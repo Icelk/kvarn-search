@@ -351,6 +351,8 @@ pub async fn mount_search(
 
             hits.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
 
+            hits.drain(std::cmp::min(hits.len(), 50)..);
+
             let mut body = WriteableBytes::with_capacity(256);
 
             // UNWRAP: The values should not panic when serializing.
