@@ -1,8 +1,8 @@
--   [ ] Panic when many words are hits.
+-   [x] Panic when many words are hits.
 -   [x] Performance of getting docs from Kvarn.
     -   Post? Push?
--   [ ] Option to only use exact.
--   [ ] Higher rating when conditional occurrences are closer together.
+-   [x] Option to only use exact.
+-   [x] Higher rating when conditional occurrences are closer together.
 -   [x] Some conditional occurrences are very far away.
--   Cache responses?
+-   [ ] Cache responses?
     -   Independent of Kvarn's cache settings.

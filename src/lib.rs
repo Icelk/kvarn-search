@@ -10,7 +10,7 @@ struct HitResponse {
     context: String,
     start_in_context: usize,
 
-    conditional_occurrences: Vec<usize>,
+    associated_occurrences: Vec<usize>,
 }
 
 fn request(path: impl AsRef<str>) -> Request<application::Body> {
@@ -23,6 +23,9 @@ fn request(path: impl AsRef<str>) -> Request<application::Body> {
         .unwrap()
 }
 
+/// Quite slow, takes ~70ms (debug) to get
+///
+/// It's the HTML parsing which is the real problem.
 fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> {
     let body = &response.identity_body;
 
@@ -43,18 +46,22 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
                 let html = scraper::Html::parse_document(&body);
 
                 let selected_body = html
-                    .select(&scraper::Selector::parse("body").unwrap())
-                    .next();
+                    .select(&scraper::Selector::parse("main").unwrap())
+                    .next()
+                    .or_else(|| {
+                        html.select(&scraper::Selector::parse("body").unwrap())
+                            .next()
+                    });
 
-                if let Some(body) = selected_body {
+                if let Some(content) = selected_body {
                     // `TODO`: Convert to MD-like format to get better paragraphs,
                     // headings, and general formatting.
-                    let text = body.text();
+                    let text = content.text();
 
-                    let mut document = String::new();
+                    let mut document = String::with_capacity(body.len() / 2);
 
                     for text_node in text {
-                        document.push_str(text_node);
+                        document.push_str(text_node.trim());
                         document.push_str("\n\n");
                     }
 
@@ -155,7 +162,7 @@ pub async fn mount_search(
     extensions: &mut Extensions,
     path: impl AsRef<str>,
 ) -> SearchEngineHandle {
-    let index = search::SimpleIndex::new(0.8, 1_000);
+    let index = search::SimpleIndex::new(0.85, search::proximity::Algorithm::Hamming, 2_500);
     let doc_map = search::DocumentMap::new();
 
     let handle = SearchEngineHandle {
@@ -337,8 +344,8 @@ pub async fn mount_search(
                         context,
                         start_in_context: occurrence.start() - start,
 
-                        conditional_occurrences: occurrence
-                            .conditional_occurrences()
+                        associated_occurrences: occurrence
+                            .associated_occurrences()
                             .map(|occ| occ.start())
                             .collect(),
                     }
@@ -442,4 +449,5 @@ fn find_documents(host: &Host) -> Vec<String> {
     list
 }
 
+// Watch for changes and rebuild index/cache, only for the resources that changed.
 // pub fn watch(host: &Host, handle: SearchEngineHandle) {}
