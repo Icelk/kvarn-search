@@ -1,0 +1,16 @@
+[package]
+name = "kvarn-search"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+kvarn = { path = "../kvarn", default-features = false }
+notify = "^4"
+scraper = "^0.12"
+search = { path = "../search" }
+serde = { version = "^1", features = ["derive"] }
+serde_json = "^1"
+tokio = { version = "^1", default-features = false, features = ["sync"] }
+walkdir = "^2"
