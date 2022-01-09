@@ -212,7 +212,7 @@ pub async fn mount_search(
                 }
             };
 
-            warn!("Starting getting docs: {:?}", now.elapsed().as_micros());
+            debug!("Starting getting docs: {:?}", now.elapsed().as_micros());
 
             let documents: Vec<_> = {
                 let lock = handle.inner.index.read().await;
@@ -235,7 +235,7 @@ pub async fn mount_search(
                 documents.collect()
             };
 
-            warn!("Get docs with query: {:?}", now.elapsed().as_micros());
+            debug!("Get docs with query: {:?}", now.elapsed().as_micros());
 
             let documents = {
                 let lock = handle.inner.doc_map.read().await;
@@ -251,7 +251,7 @@ pub async fn mount_search(
                 docs
             };
 
-            warn!("Get docs names: {:?}", now.elapsed().as_micros());
+            debug!("Get docs names: {:?}", now.elapsed().as_micros());
 
             let documents = {
                 let doc_len = documents.len();
@@ -296,7 +296,7 @@ pub async fn mount_search(
                 docs
             };
 
-            warn!("Get doc contents: {:?}", now.elapsed().as_micros());
+            debug!("Get doc contents: {:?}", now.elapsed().as_micros());
 
             let mut hits: Vec<_> = {
                 let index = handle.inner.index.read().await;
@@ -354,7 +354,7 @@ pub async fn mount_search(
                 occurrences.collect()
             };
 
-            warn!("Get hits / occurrences: {:?}", now.elapsed().as_micros());
+            debug!("Get hits / occurrences: {:?}", now.elapsed().as_micros());
 
             hits.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
 
@@ -370,7 +370,7 @@ pub async fn mount_search(
                 .body(body.into_inner().freeze())
                 .unwrap();
 
-            warn!("Done: {:?}", now.elapsed().as_micros());
+            debug!("Done: {:?}", now.elapsed().as_micros());
 
             FatResponse::no_cache(response)
         }),
