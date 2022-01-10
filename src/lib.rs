@@ -85,11 +85,74 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
     Ok(text)
 }
 
+#[derive(Debug)]
+pub struct Options {
+    /// Forces documents which have been deleted to be removed from the index immediately.
+    ///
+    /// This brings more consistent query times for a bit of performance if the FS is modified
+    /// often.
+    ///
+    /// Default `true`
+    pub force_remove: bool,
+    /// The limit of word proximity to accept as "close enough".
+    ///
+    /// Between [0..1], where 1 is the exact word, and 0 is basically everything.
+    ///
+    /// Default: `0.85`
+    pub proximity_threshold: f32,
+    /// Which proximity algorithm to use.
+    ///
+    /// Default: [`search::proximity::Algorithm::Hamming`]
+    pub proximity_algorithm: search::proximity::Algorithm,
+    /// The limit of different words where it will only search for proximate words which start with
+    /// the same [`char`].
+    ///
+    /// Default: `2_500`
+    pub word_count_limit: usize,
+    /// Max number of hits to respond with.
+    ///
+    /// Does not improve performance of the searching algorithm.
+    ///
+    /// Default: `50`
+    pub response_hits_limit: usize,
+    /// Distance of two occurrences where they are considered "next to each other".
+    ///
+    /// Default: `100`
+    pub distance_threshold: usize,
+
+    /// Additional documents to always index.
+    /// Will only be once, at start-up, if they aren't on the FS.
+    ///
+    /// Only the [`Uri::path`] component will be used, so setting this to another domain won't work
+    /// :)
+    pub additional_paths: Vec<Uri>,
+}
+impl Options {
+    pub fn new() -> Self {
+        Self {
+            force_remove: true,
+            proximity_threshold: 0.85,
+            proximity_algorithm: search::proximity::Algorithm::Hamming,
+            word_count_limit: 2_500,
+            response_hits_limit: 50,
+            distance_threshold: 100,
+            additional_paths: Vec::new(),
+        }
+    }
+}
+impl Default for Options {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// To not have to [`Arc`]s.
 #[derive(Debug)]
 struct SearchEngineHandleInner {
     index: RwLock<search::SimpleIndex>,
     doc_map: RwLock<search::DocumentMap>,
+    options: Options,
+    watching: threading::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +164,7 @@ impl SearchEngineHandle {
     /// The requests are processed in parallell - this should return within the longest response
     /// duration-
     pub async fn index(&self, host: &Host) {
-        let documents = find_documents(host);
+        let documents = find_documents(host, &self.inner.options.additional_paths);
 
         let mut handles = Vec::with_capacity(documents.len());
 
@@ -280,14 +343,21 @@ impl SearchEngineHandle {
 pub async fn mount_search(
     extensions: &mut Extensions,
     path: impl AsRef<str>,
+    options: Options,
 ) -> SearchEngineHandle {
-    let index = search::SimpleIndex::new(0.85, search::proximity::Algorithm::Hamming, 2_500);
+    let index = search::SimpleIndex::new(
+        options.proximity_threshold,
+        options.proximity_algorithm,
+        options.word_count_limit,
+    );
     let doc_map = search::DocumentMap::new();
 
     let handle = SearchEngineHandle {
         inner: Arc::new(SearchEngineHandleInner {
             index: RwLock::new(index),
             doc_map: RwLock::new(doc_map),
+            options,
+            watching: false.into(),
         }),
     };
     let ext_handle = handle.clone();
@@ -427,7 +497,9 @@ pub async fn mount_search(
 
                 // UNWRAP: We handled this above, and have asserted there are not stray NOTs in the
                 // query.
-                let occurrence_iter = query.occurrences(&occurrences, 100).unwrap();
+                let occurrence_iter = query
+                    .occurrences(&occurrences, ext_handle.inner.options.distance_threshold)
+                    .unwrap();
 
                 let occurrence_iter = occurrence_iter.map(|occurrence| {
                     fn first_char_boundary(s: &str, start: usize, backwards: bool) -> usize {
@@ -497,7 +569,7 @@ pub async fn mount_search(
 
             hits.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
 
-            hits.drain(std::cmp::min(hits.len(), 50)..);
+            hits.drain(std::cmp::min(hits.len(), ext_handle.inner.options.response_hits_limit)..);
 
             let mut body = WriteableBytes::with_capacity(256);
 
@@ -518,39 +590,67 @@ pub async fn mount_search(
     handle
 }
 
-fn find_documents(host: &Host) -> Vec<String> {
-    struct PrefixPath {
-        path: PathBuf,
-        absolute: bool,
+struct PrefixPath {
+    path: PathBuf,
+    absolute: bool,
+}
+impl PrefixPath {
+    fn new(host: &Host) -> Self {
+        Self {
+            path: host.path.join(host.options.get_public_data_dir()),
+            absolute: false,
+        }
     }
-    impl PrefixPath {
-        fn new(host: &Host) -> Self {
-            Self {
-                path: host.path.join(host.options.get_public_data_dir()),
-                absolute: false,
-            }
+    fn prefix(&self) -> &Path {
+        &self.path
+    }
+    fn strip_prefix<'a>(&self, path: &'a Path) -> Option<&'a Path> {
+        path.strip_prefix(self.prefix()).ok()
+    }
+    fn update(&mut self, path: impl AsRef<Path>, host_absolute: bool) {
+        let path = path.as_ref();
+        if !host_absolute && path.is_absolute() {
+            self.make_absolute();
         }
-        fn prefix(&self) -> &Path {
-            &self.path
+    }
+    fn make_absolute(&mut self) {
+        if self.path.is_absolute() || self.absolute {
+            return;
         }
-        fn make_absolute(&mut self) {
-            if self.path.is_absolute() || self.absolute {
-                return;
-            }
-            if let Ok(mut current) = std::env::current_dir() {
-                current.push(self.prefix());
-                self.path = current;
-            }
-            self.absolute = true;
+        if let Ok(mut current) = std::env::current_dir() {
+            current.push(self.prefix());
+            self.path = current;
         }
+        self.absolute = true;
     }
 
+    fn process(&mut self, path: impl AsRef<Path>, host_absolute: bool) -> Option<String> {
+        let path = path.as_ref();
+        self.update(path, host_absolute);
+
+        let uri_path = if let Some(uri_path) = self.strip_prefix(path) {
+            uri_path
+        } else {
+            warn!("Host path isn't prefix of indexed resource.");
+            path
+        };
+        if let Some(uri_path) = uri_path.to_str() {
+            Some(format!("/{}", uri_path))
+        } else {
+            warn!("Path {:?} is not UTF-8. Will not index.", uri_path);
+            None
+        }
+    }
+}
+fn find_documents(host: &Host, additional: &[Uri]) -> Vec<String> {
     let mut list: Vec<_> = host
         .extensions
         .get_prepare_single()
         .keys()
         .cloned()
         .collect();
+
+    list.extend(additional.iter().map(|uri| uri.path().to_owned()));
 
     let host_absolute = host.path.is_absolute() || host.options.get_public_data_dir().is_absolute();
     let mut prefix_path = PrefixPath::new(host);
@@ -563,30 +663,10 @@ fn find_documents(host: &Host) -> Vec<String> {
     {
         let path = entry.path();
 
-        if path.is_absolute() && !host_absolute {
-            prefix_path.make_absolute();
-        }
-
-        let uri_path = if let Ok(uri_path) = path.strip_prefix(prefix_path.prefix()) {
-            uri_path
-        } else {
-            warn!("Host path isn't prefix of indexed resource.");
-            path
-        };
-
-        if let Some(uri_path) = uri_path.to_str() {
-            let uri_path = format!("/{}", uri_path);
+        if let Some(uri_path) = prefix_path.process(path, host_absolute) {
             list.push(uri_path);
-        } else {
-            warn!("Path {:?} is not UTF-8. Will not index.", uri_path);
         }
-        // strip prefix.
-        // if entry is absolute but not host path, make a struct which caches the absolute
-        // prefix of the host path.
     }
 
     list
 }
-
-// Watch for changes and rebuild index/cache, only for the resources that changed.
-// pub fn watch(host: &Host, handle: SearchEngineHandle) {}
