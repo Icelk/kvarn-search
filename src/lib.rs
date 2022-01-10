@@ -153,6 +153,7 @@ struct SearchEngineHandleInner {
     doc_map: RwLock<search::DocumentMap>,
     options: Options,
     watching: threading::atomic::AtomicBool,
+    document_cache: RwLock<HashMap<String, Arc<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,8 +170,6 @@ impl SearchEngineHandle {
         let mut handles = Vec::with_capacity(documents.len());
 
         for document in documents {
-            let mut request = request(&document);
-
             // SAFETY: We use the pointer inside the future.
             // When we await all handles at the end of this fn, the pointer is no longer used.
             // Therefore, it doesn't escape this fn. host isn't used after it's lifetime.
@@ -178,18 +177,9 @@ impl SearchEngineHandle {
             let me = self.clone();
             let handle = tokio::spawn(async move {
                 let host = unsafe { host_ptr.get() };
-                let response = kvarn::handle_cache(
-                    &mut request,
-                    net::SocketAddrV4::new(net::Ipv4Addr::LOCALHOST, 0).into(),
-                    host,
-                )
-                .await;
+                let response = me.get_response(host, &document).await;
 
-                if !response.response.status().is_success() {
-                    return;
-                }
-
-                let text = if let Ok(text) = text_from_response(&response) {
+                let text = if let Some(text) = response {
                     text
                 } else {
                     return;
@@ -221,8 +211,42 @@ impl SearchEngineHandle {
         debug!("Doc map: {:#?}", self.inner.doc_map.read().await);
     }
 
+    async fn get_response(&self, host: &Host, document: &str) -> Option<Arc<String>> {
+        {
+            let cache = self.inner.document_cache.read().await;
+            if let Some(text) = cache.get(document) {
+                return Some(Arc::clone(text));
+            }
+        }
+
+        let mut request = request(&document);
+
+        let response = kvarn::handle_cache(
+            &mut request,
+            net::SocketAddrV4::new(net::Ipv4Addr::LOCALHOST, 0).into(),
+            host,
+        )
+        .await;
+
+        if !response.response.status().is_success() {
+            return None;
+        }
+
+        let text = if let Ok(text) = text_from_response(&response) {
+            Arc::new(text.into_owned())
+        } else {
+            return None;
+        };
+
+        {
+            let mut cache = self.inner.document_cache.write().await;
+            cache.insert(document.to_owned(), Arc::clone(&text));
+        }
+        Some(text)
+    }
+
     /// Watch for changes and rebuild index/cache, only for the resources that changed.
-    pub async fn watch(&mut self, host: &Host) {
+    pub async fn watch(&self, host: &Host) {
         use notify::{event::EventKind::*, event::*, RecursiveMode, Watcher};
         use tokio::sync::mpsc::channel;
 
@@ -358,6 +382,7 @@ pub async fn mount_search(
             doc_map: RwLock::new(doc_map),
             options,
             watching: false.into(),
+            document_cache: RwLock::new(HashMap::new()),
         }),
     };
     let ext_handle = handle.clone();
@@ -449,25 +474,14 @@ pub async fn mount_search(
 
                 for (id, doc) in documents {
                     let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
+                    let se_handle = handle.clone();
                     let handle = tokio::spawn(async move {
                         let host = unsafe { host_ptr.get() };
                         debug!("Requesting {}{}", host.name, doc);
-                        let mut request = request(&doc);
 
-                        let response = UnsafeSendSync(Box::pin(kvarn::handle_cache(
-                            &mut request,
-                            net::SocketAddrV4::new(net::Ipv4Addr::LOCALHOST, 0).into(),
-                            host,
-                        )));
-                        let response = response.await;
+                        let text = se_handle.get_response(host, &doc).await?;
 
-                        let text = if let Ok(text) = text_from_response(&response) {
-                            text
-                        } else {
-                            return None;
-                        };
-
-                        Some((id, Arc::new(text.into_owned())))
+                        Some((id, text))
                     });
 
                     handles.push(handle);
