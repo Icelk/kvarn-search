@@ -2,6 +2,8 @@ use kvarn::prelude::*;
 use search::index::Provider;
 use tokio::sync::RwLock;
 
+pub use search;
+
 #[derive(serde::Serialize)]
 struct HitResponse {
     start: usize,
@@ -154,6 +156,122 @@ impl SearchEngineHandle {
             self.inner.index.read().await.words().count()
         );
         debug!("Doc map: {:#?}", self.inner.doc_map.read().await);
+    }
+
+    /// Watch for changes and rebuild index/cache, only for the resources that changed.
+    pub async fn watch(&mut self, host: &Host) {
+        use notify::{event::EventKind::*, event::*, RecursiveMode, Watcher};
+        use tokio::sync::mpsc::channel;
+
+        struct EventEffects {
+            delete: Option<PathBuf>,
+            index: Option<PathBuf>,
+        }
+
+        let (tx, mut rx) = channel(1024);
+
+        let mut watcher = notify::RecommendedWatcher::new(move |res| {
+            futures::executor::block_on(async {
+                tx.send(res).await.expect("failed to send notify message")
+            })
+        })
+        .expect("failed to start watching directory for changes");
+
+        let path = host.path.join(host.options.get_public_data_dir());
+
+        watcher.watch(&path, RecursiveMode::Recursive).unwrap();
+
+        self.inner.watching.store(true, threading::Ordering::SeqCst);
+        loop {
+            let effects: EventEffects =
+                match rx.recv().await.expect("Failed to receive FS watch message") {
+                    Ok(mut event) => {
+                        let mut iter = std::mem::take(&mut event.paths).into_iter();
+                        let source = iter.next();
+                        let destination = iter.next();
+                        match event.kind {
+                            Create(CreateKind::File) => EventEffects {
+                                delete: None,
+                                index: source,
+                            },
+                            Remove(RemoveKind::File) => EventEffects {
+                                delete: source,
+                                index: None,
+                            },
+                            Modify(ModifyKind::Data(_)) => EventEffects {
+                                delete: None,
+                                index: source,
+                            },
+                            Modify(ModifyKind::Name(RenameMode::To)) => EventEffects {
+                                delete: None,
+                                index: source,
+                            },
+                            Modify(ModifyKind::Name(RenameMode::From)) => EventEffects {
+                                delete: source,
+                                index: None,
+                            },
+                            Modify(ModifyKind::Name(RenameMode::Both)) => EventEffects {
+                                delete: source,
+                                index: destination,
+                            },
+                            _ => EventEffects {
+                                delete: None,
+                                index: None,
+                            },
+                        }
+                    }
+                    Err(err) => {
+                        warn!("Got error while watching directory for changes: {:?}", err);
+                        continue;
+                    }
+                };
+            if let Some(delete) = effects.delete.as_ref().and_then(|path| path.to_str()) {
+                if self.inner.options.force_remove {
+                    let mut doc_map = self.inner.doc_map.write().await;
+                    let mut index = self.inner.index.write().await;
+
+                    let id = doc_map.get_id(delete);
+                    if let Some(id) = id {
+                        doc_map.force_remove(id, &mut *index);
+                    }
+                } else {
+                    // On remove, rely on the missing feature of occurrences to clean it up.
+                }
+            }
+
+            if let Some(index) = effects.index.as_ref().and_then(|path| path.to_str()) {
+                let mut request = request(&index);
+
+                let response = kvarn::handle_cache(
+                    &mut request,
+                    net::SocketAddrV4::new(net::Ipv4Addr::LOCALHOST, 0).into(),
+                    host,
+                )
+                .await;
+
+                if !response.response.status().is_success() {
+                    return;
+                }
+
+                let text = if let Ok(text) = text_from_response(&response) {
+                    text
+                } else {
+                    return;
+                };
+
+                let id = {
+                    let mut doc_map = self.inner.doc_map.write().await;
+
+                    doc_map.reserve_id(index)
+                };
+
+                {
+                    // `TODO`: Do this on a blocking thread. How to get lock?
+                    let mut index = self.inner.index.write().await;
+                    index.digest_document(id, &text);
+                }
+            }
+        }
     }
 }
 
