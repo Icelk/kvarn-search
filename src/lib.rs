@@ -299,7 +299,7 @@ pub async fn mount_search(
 
             debug!("Get doc contents: {:?}", now.elapsed().as_micros());
 
-            let mut hits: Vec<_> = {
+            let (mut hits, missing) = {
                 let index = handle.inner.index.read().await;
                 let doc_map = handle.inner.doc_map.read().await;
                 let mut occurrences = search::SimpleIndexOccurenceProvider::new(&*index);
@@ -309,9 +309,9 @@ pub async fn mount_search(
 
                 // UNWRAP: We handled this above, and have asserted there are not stray NOTs in the
                 // query.
-                let occurrences = query.occurrences(&occurrences, 100).unwrap();
+                let occurrence_iter = query.occurrences(&occurrences, 100).unwrap();
 
-                let occurrences = occurrences.map(|occurrence| {
+                let occurrence_iter = occurrence_iter.map(|occurrence| {
                     fn first_char_boundary(s: &str, start: usize, backwards: bool) -> usize {
                         let mut start = start;
                         loop {
@@ -360,8 +360,20 @@ pub async fn mount_search(
                     }
                 });
 
-                occurrences.collect()
+                let hits = occurrence_iter.collect::<Vec<_>>();
+
+                let missing = occurrences.missing();
+
+                (hits, missing)
             };
+
+            {
+                if !missing.list().is_empty() {
+                    info!("Removing {} elements from index.", missing.list().len());
+                }
+                let mut index = handle.inner.index.write().await;
+                missing.apply(&mut *index);
+            }
 
             debug!("Get hits / occurrences: {:?}", now.elapsed().as_micros());
 
