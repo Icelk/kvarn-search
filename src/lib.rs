@@ -119,6 +119,12 @@ pub struct Options {
     ///
     /// Default: `100`
     pub distance_threshold: usize,
+    /// Interval of clearing of the internal cache.
+    ///
+    /// This greatly improves performance, and stays out of your way, as it clears itself.
+    ///
+    /// Default: `10 minutes`
+    pub clear_interval: time::Duration,
 
     /// Additional documents to always index.
     /// Will only be once, at start-up, if they aren't on the FS.
@@ -136,6 +142,7 @@ impl Options {
             word_count_limit: 2_500,
             response_hits_limit: 50,
             distance_threshold: 100,
+            clear_interval: time::Duration::from_secs(10 * 60),
             additional_paths: Vec::new(),
         }
     }
@@ -600,6 +607,21 @@ pub async fn mount_search(
             FatResponse::no_cache(response)
         }),
     );
+
+    let clear_handle = handle.clone();
+
+    tokio::spawn(async move {
+        let handle = clear_handle;
+
+        loop {
+            tokio::time::sleep(handle.inner.options.clear_interval).await;
+
+            {
+                let mut cache = handle.inner.document_cache.write().await;
+                cache.clear();
+            }
+        }
+    });
 
     handle
 }
