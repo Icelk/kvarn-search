@@ -10,8 +10,8 @@ struct HitResponse {
     rating: f32,
     path: String,
     context: String,
-    start_in_context_bytes: usize,
-    start_in_context_chars: usize,
+    context_start_bytes: usize,
+    context_start_chars: usize,
 
     associated_occurrences: Vec<usize>,
 }
@@ -541,20 +541,20 @@ pub async fn mount_search(
 
                     let context = doc[start..end].to_owned();
 
-                    let start_in_context_bytes = occurrence.start() - start;
+                    let context_start_bytes = occurrence.start() - start;
 
                     HitResponse {
                         start: occurrence.start(),
                         rating: occurrence.rating(),
                         path: doc_map.get_name(id).unwrap_or("").to_owned(),
-                        start_in_context_chars: {
+                        context_start_chars: {
                             context
                                 .char_indices()
-                                .position(|(pos, _char)| pos >= start_in_context_bytes)
-                                .unwrap_or(start_in_context_bytes)
+                                .position(|(pos, _char)| pos >= context_start_bytes)
+                                .unwrap_or(context_start_bytes)
                         },
                         context,
-                        start_in_context_bytes,
+                        context_start_bytes,
 
                         associated_occurrences: occurrence
                             .associated_occurrences()
