@@ -432,25 +432,29 @@ pub async fn mount_search(
 
             debug!("Starting getting docs: {:?}", now.elapsed().as_micros());
 
-            let documents = {
+            let (documents, proximate_map) = {
                 let lock = handle.inner.index.read().await;
-                let documents = query.documents(&*lock);
-                let documents_iter = documents.iter().map(UnsafeSendSync);
-                let documents_iter = match documents_iter {
-                    Ok(docs) => docs,
-                    Err(err) => match err {
-                        elipdotter::query::IterError::StrayNot => {
-                            return default_error_response(
-                                StatusCode::BAD_REQUEST,
-                                host,
-                                Some("NOT without AND, this is an illegal operation"),
-                            )
-                            .await
-                        }
-                    },
-                };
+                let mut documents = query.documents(&*lock);
+                let docs = {
+                    let documents_iter = documents.iter().map(UnsafeSendSync);
+                    let documents_iter = match documents_iter {
+                        Ok(docs) => docs,
+                        Err(err) => match err {
+                            elipdotter::query::IterError::StrayNot => {
+                                return default_error_response(
+                                    StatusCode::BAD_REQUEST,
+                                    host,
+                                    Some("NOT without AND, this is an illegal operation"),
+                                )
+                                .await
+                            }
+                        },
+                    };
 
-                documents_iter.inner().collect::<Vec<_>>()
+                    documents_iter.inner().collect::<Vec<_>>()
+                };
+                let proximate_map = documents.take_proximate_map();
+                (docs, proximate_map)
             };
 
             debug!("Get docs with query: {:?}", now.elapsed().as_micros());
@@ -508,7 +512,6 @@ pub async fn mount_search(
             let (mut hits, missing) = {
                 let index = handle.inner.index.read().await;
                 let doc_map = handle.inner.doc_map.read().await;
-                let proximate_map = query.documents(&*index).into_proximate_map();
                 let mut occurrences =
                     elipdotter::SimpleIndexOccurenceProvider::new(&*index, &proximate_map);
                 for (id, body) in &documents {
