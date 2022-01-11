@@ -334,20 +334,12 @@ impl SearchEngineHandle {
             }
 
             if let Some(index) = effects.index.as_ref().and_then(|path| path.to_str()) {
-                let mut request = request(&index);
-
-                let response = kvarn::handle_cache(
-                    &mut request,
-                    net::SocketAddrV4::new(net::Ipv4Addr::LOCALHOST, 0).into(),
-                    host,
-                )
-                .await;
-
-                if !response.response.status().is_success() {
-                    return;
+                {
+                    let mut cache = self.inner.document_cache.write().await;
+                    cache.remove(index);
                 }
 
-                let text = if let Ok(text) = text_from_response(&response) {
+                let text = if let Some(text) = self.get_response(host, index).await {
                     text
                 } else {
                     return;
