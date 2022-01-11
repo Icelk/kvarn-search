@@ -1,8 +1,8 @@
+use elipdotter::index::Provider;
 use kvarn::prelude::*;
-use search::index::Provider;
 use tokio::sync::RwLock;
 
-pub use search;
+pub use elipdotter;
 
 #[derive(serde::Serialize)]
 struct HitResponse {
@@ -103,7 +103,7 @@ pub struct Options {
     /// Which proximity algorithm to use.
     ///
     /// Default: [`search::proximity::Algorithm::Hamming`]
-    pub proximity_algorithm: search::proximity::Algorithm,
+    pub proximity_algorithm: elipdotter::proximity::Algorithm,
     /// The limit of different words where it will only search for proximate words which start with
     /// the same [`char`].
     ///
@@ -132,7 +132,7 @@ impl Options {
         Self {
             force_remove: true,
             proximity_threshold: 0.85,
-            proximity_algorithm: search::proximity::Algorithm::Hamming,
+            proximity_algorithm: elipdotter::proximity::Algorithm::Hamming,
             word_count_limit: 2_500,
             response_hits_limit: 50,
             distance_threshold: 100,
@@ -149,8 +149,8 @@ impl Default for Options {
 /// To not have to [`Arc`]s.
 #[derive(Debug)]
 struct SearchEngineHandleInner {
-    index: RwLock<search::SimpleIndex>,
-    doc_map: RwLock<search::DocumentMap>,
+    index: RwLock<elipdotter::SimpleIndex>,
+    doc_map: RwLock<elipdotter::DocumentMap>,
     options: Options,
     watching: threading::atomic::AtomicBool,
     document_cache: RwLock<HashMap<String, Arc<String>>>,
@@ -369,12 +369,12 @@ pub async fn mount_search(
     path: impl AsRef<str>,
     options: Options,
 ) -> SearchEngineHandle {
-    let index = search::SimpleIndex::new(
+    let index = elipdotter::SimpleIndex::new(
         options.proximity_threshold,
         options.proximity_algorithm,
         options.word_count_limit,
     );
-    let doc_map = search::DocumentMap::new();
+    let doc_map = elipdotter::DocumentMap::new();
 
     let handle = SearchEngineHandle {
         inner: Arc::new(SearchEngineHandleInner {
@@ -417,7 +417,7 @@ pub async fn mount_search(
                 .await;
             };
 
-            let query: search::Query = match query.value().parse() {
+            let query: elipdotter::Query = match query.value().parse() {
                 Ok(q) => q,
                 Err(err) => {
                     let message = format!("query malformed: {}", err);
@@ -434,7 +434,7 @@ pub async fn mount_search(
                 let documents = match documents {
                     Ok(docs) => docs,
                     Err(err) => match err {
-                        search::query::IterError::StrayNot => {
+                        elipdotter::query::IterError::StrayNot => {
                             return default_error_response(
                                 StatusCode::BAD_REQUEST,
                                 host,
@@ -504,7 +504,7 @@ pub async fn mount_search(
             let (mut hits, missing) = {
                 let index = handle.inner.index.read().await;
                 let doc_map = handle.inner.doc_map.read().await;
-                let mut occurrences = search::SimpleIndexOccurenceProvider::new(&*index);
+                let mut occurrences = elipdotter::SimpleIndexOccurenceProvider::new(&*index);
                 for (id, body) in &documents {
                     occurrences.add_document(*id, Arc::clone(body));
                 }
