@@ -4,6 +4,88 @@ use tokio::sync::RwLock;
 
 pub use elipdotter;
 
+#[derive(Debug)]
+pub struct Options {
+    /// Forces documents which have been deleted to be removed from the index immediately.
+    ///
+    /// This brings more consistent query times for a bit of performance if the FS is modified
+    /// often.
+    ///
+    /// Default `true`
+    pub force_remove: bool,
+    /// The limit of word proximity to accept as "close enough".
+    ///
+    /// Between [0..1], where 1 is the exact word, and 0 is basically everything.
+    ///
+    /// Default: `0.85`
+    pub proximity_threshold: f32,
+    /// Which proximity algorithm to use.
+    ///
+    /// Default: [`search::proximity::Algorithm::Hamming`]
+    pub proximity_algorithm: elipdotter::proximity::Algorithm,
+    /// The limit of different words where it will only search for proximate words which start with
+    /// the same [`char`].
+    ///
+    /// Default: `2_500`
+    pub word_count_limit: usize,
+    /// Max number of hits to respond with.
+    ///
+    /// Does not improve performance of the searching algorithm.
+    ///
+    /// Default: `50`
+    pub response_hits_limit: usize,
+    /// Distance of two occurrences where they are considered "next to each other".
+    ///
+    /// Default: `100`
+    pub distance_threshold: usize,
+    /// Interval of clearing of the internal cache.
+    ///
+    /// This greatly improves performance, and stays out of your way, as it clears itself.
+    ///
+    /// Default: `10 minutes`
+    pub clear_interval: time::Duration,
+    /// The max length of the input query.
+    ///
+    /// If the length is too large, often many documents are searched, hurting performance.
+    ///
+    /// Default: `100`
+    pub query_max_length: usize,
+    /// The highest number of [`elipdotter::Part::String`] a query can have.
+    ///
+    /// Allowing too many of these slows down the query.
+    ///
+    /// Default: `10`
+    pub query_max_terms: usize,
+
+    /// Additional documents to always index.
+    /// Will only be once, at start-up, if they aren't on the FS.
+    ///
+    /// Only the [`Uri::path`] component will be used, so setting this to another domain won't work
+    /// :)
+    pub additional_paths: Vec<Uri>,
+}
+impl Options {
+    pub fn new() -> Self {
+        Self {
+            force_remove: true,
+            proximity_threshold: 0.85,
+            proximity_algorithm: elipdotter::proximity::Algorithm::Hamming,
+            word_count_limit: 2_500,
+            response_hits_limit: 50,
+            distance_threshold: 100,
+            clear_interval: time::Duration::from_secs(10 * 60),
+            query_max_length: 100,
+            query_max_terms: 10,
+            additional_paths: Vec::new(),
+        }
+    }
+}
+impl Default for Options {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(serde::Serialize)]
 struct HitResponse {
     start: usize,
@@ -83,74 +165,6 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
         _ => return Err(()),
     };
     Ok(text)
-}
-
-#[derive(Debug)]
-pub struct Options {
-    /// Forces documents which have been deleted to be removed from the index immediately.
-    ///
-    /// This brings more consistent query times for a bit of performance if the FS is modified
-    /// often.
-    ///
-    /// Default `true`
-    pub force_remove: bool,
-    /// The limit of word proximity to accept as "close enough".
-    ///
-    /// Between [0..1], where 1 is the exact word, and 0 is basically everything.
-    ///
-    /// Default: `0.85`
-    pub proximity_threshold: f32,
-    /// Which proximity algorithm to use.
-    ///
-    /// Default: [`search::proximity::Algorithm::Hamming`]
-    pub proximity_algorithm: elipdotter::proximity::Algorithm,
-    /// The limit of different words where it will only search for proximate words which start with
-    /// the same [`char`].
-    ///
-    /// Default: `2_500`
-    pub word_count_limit: usize,
-    /// Max number of hits to respond with.
-    ///
-    /// Does not improve performance of the searching algorithm.
-    ///
-    /// Default: `50`
-    pub response_hits_limit: usize,
-    /// Distance of two occurrences where they are considered "next to each other".
-    ///
-    /// Default: `100`
-    pub distance_threshold: usize,
-    /// Interval of clearing of the internal cache.
-    ///
-    /// This greatly improves performance, and stays out of your way, as it clears itself.
-    ///
-    /// Default: `10 minutes`
-    pub clear_interval: time::Duration,
-
-    /// Additional documents to always index.
-    /// Will only be once, at start-up, if they aren't on the FS.
-    ///
-    /// Only the [`Uri::path`] component will be used, so setting this to another domain won't work
-    /// :)
-    pub additional_paths: Vec<Uri>,
-}
-impl Options {
-    pub fn new() -> Self {
-        Self {
-            force_remove: true,
-            proximity_threshold: 0.85,
-            proximity_algorithm: elipdotter::proximity::Algorithm::Hamming,
-            word_count_limit: 2_500,
-            response_hits_limit: 50,
-            distance_threshold: 100,
-            clear_interval: time::Duration::from_secs(10 * 60),
-            additional_paths: Vec::new(),
-        }
-    }
-}
-impl Default for Options {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// To not have to [`Arc`]s.
@@ -421,6 +435,15 @@ pub async fn mount_search(
                 .await;
             };
 
+            if query.value().len() > handle.inner.options.query_max_length {
+                return default_error_response(
+                    StatusCode::BAD_REQUEST,
+                    host,
+                    Some("query is too long"),
+                )
+                .await;
+            }
+
             let query: elipdotter::Query = match query.value().parse() {
                 Ok(q) => q,
                 Err(err) => {
@@ -429,6 +452,19 @@ pub async fn mount_search(
                         .await;
                 }
             };
+
+            {
+                let mut string_parts = 0;
+                query.root().for_each_string(&mut |_s| string_parts += 1);
+                if string_parts > handle.inner.options.query_max_terms {
+                    return default_error_response(
+                        StatusCode::BAD_REQUEST,
+                        host,
+                        Some("too many parts in the query"),
+                    )
+                    .await;
+                }
+            }
 
             debug!("Starting getting docs: {:?}", now.elapsed().as_micros());
 
