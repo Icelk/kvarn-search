@@ -398,6 +398,11 @@ pub async fn mount_search(
                     Pin::new(&mut self.0).poll(cx)
                 }
             }
+            impl<T> UnsafeSendSync<T> {
+                fn inner(self) -> T {
+                    self.0
+                }
+            }
 
             let now = time::Instant::now();
 
@@ -427,10 +432,11 @@ pub async fn mount_search(
 
             debug!("Starting getting docs: {:?}", now.elapsed().as_micros());
 
-            let documents: Vec<_> = {
+            let documents = {
                 let lock = handle.inner.index.read().await;
-                let documents = query.documents(&*lock).map(UnsafeSendSync);
-                let documents = match documents {
+                let documents = query.documents(&*lock);
+                let documents_iter = documents.iter().map(UnsafeSendSync);
+                let documents_iter = match documents_iter {
                     Ok(docs) => docs,
                     Err(err) => match err {
                         elipdotter::query::IterError::StrayNot => {
@@ -444,8 +450,7 @@ pub async fn mount_search(
                     },
                 };
 
-                let documents = documents.0;
-                documents.collect()
+                documents_iter.inner().collect::<Vec<_>>()
             };
 
             debug!("Get docs with query: {:?}", now.elapsed().as_micros());
@@ -503,7 +508,9 @@ pub async fn mount_search(
             let (mut hits, missing) = {
                 let index = handle.inner.index.read().await;
                 let doc_map = handle.inner.doc_map.read().await;
-                let mut occurrences = elipdotter::SimpleIndexOccurenceProvider::new(&*index);
+                let proximate_map = query.documents(&*index).into_proximate_map();
+                let mut occurrences =
+                    elipdotter::SimpleIndexOccurenceProvider::new(&*index, &proximate_map);
                 for (id, body) in &documents {
                     occurrences.add_document(*id, Arc::clone(body));
                 }
