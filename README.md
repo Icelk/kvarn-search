@@ -1,3 +1,7 @@
+[![crates.io version](https://img.shields.io/crates/v/kvarn-search)](https://crates.io/crates/kvarn-search)
+![lines of code](https://img.shields.io/tokei/lines/github/Icelk/kvarn-search)
+![license](https://img.shields.io/github/license/Icelk/kvarn-search)
+
 # Kvarn search
 
 Uses [elipdotter](https://github.com/Icelk/elipdotter)
