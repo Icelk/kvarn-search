@@ -186,6 +186,8 @@ impl SearchEngineHandle {
     /// The requests are processed in parallell - this should return within the longest response
     /// duration-
     pub async fn index(&self, host: &Host) {
+        let start = time::Instant::now();
+
         let documents = find_documents(host, &self.inner.options.additional_paths);
 
         let mut handles = Vec::with_capacity(documents.len());
@@ -226,8 +228,9 @@ impl SearchEngineHandle {
         }
 
         info!(
-            "Indexing done. {} words.",
-            self.inner.index.read().await.words().count()
+            "Indexing done. {} words. Took {}ms.",
+            self.inner.index.read().await.words().count(),
+            start.elapsed().as_millis(),
         );
         debug!("Doc map: {:#?}", self.inner.doc_map.read().await);
     }
