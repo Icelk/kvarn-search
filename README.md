@@ -12,6 +12,8 @@ extensions to get all documents to index.
 
 > This means this implementation currently does not crawl the local site.
 
+This extension provides an endpoint which returns the result in JSON format. The scheme is described on [icelk.dev](https://icelk.dev/api/#search).
+
 # License
 
 `kvarn-search` is licensed under the [GNU LGPLv3](COPYING).
