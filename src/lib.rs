@@ -271,6 +271,11 @@ impl SearchEngineHandle {
 
     /// Watch for changes and rebuild index/cache, only for the resources that changed.
     pub async fn watch(&self, host: &Host) {
+        if host.options.disable_fs {
+            error!("Tried to watch a host for changes when the file system is disabled for it,");
+            return;
+        }
+
         use notify::{event::EventKind::*, event::*, RecursiveMode, Watcher};
         use tokio::sync::mpsc::channel;
 
