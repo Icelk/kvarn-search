@@ -2,7 +2,7 @@
 ![lines of code](https://img.shields.io/tokei/lines/github/Icelk/kvarn-search)
 ![license](https://img.shields.io/github/license/Icelk/kvarn-search)
 
-# Kvarn search
+# [Kvarn search](https://kvarn.org/search.)
 
 Uses [elipdotter](https://github.com/Icelk/elipdotter)
 to provide search capabilities for a Kvarn host.
@@ -15,6 +15,8 @@ To get more info, check out the section about this extension in [my article abou
 > This means this implementation currently does not crawl the local site.
 
 This extension provides an endpoint which returns the result in JSON format. The scheme is described on [icelk.dev](https://icelk.dev/api/#search).
+
+For an example of a frontend, check out [this portion of the overview at kvarn.org](https://kvarn.org/search.#frontend).
 
 # License
 
