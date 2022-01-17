@@ -177,6 +177,15 @@ struct SearchEngineHandleInner {
     document_cache: RwLock<HashMap<String, Arc<String>>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum WatchError {
+    /// Can occur if the host name isn't part of the [`HostCollection`] because the host doesn't
+    /// exist, or because it's inside another collection.
+    HostNotFound,
+    /// The [file system feature](host::Options::disable_fs) was disabled for this host.
+    FsDisabled,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchEngineHandle {
     inner: Arc<SearchEngineHandleInner>,
@@ -188,7 +197,7 @@ impl SearchEngineHandle {
     pub async fn index(&self, host: &Host) {
         let start = time::Instant::now();
 
-        let documents = find_documents(host, &self.inner.options.additional_paths);
+        let documents = find_documents(host, &self.inner.options.additional_paths).await;
 
         let mut handles = Vec::with_capacity(documents.len());
 
@@ -236,12 +245,12 @@ impl SearchEngineHandle {
     }
 
     async fn get_response(&self, host: &Host, document: &str) -> Option<Arc<String>> {
-        {
-            let cache = self.inner.document_cache.read().await;
-            if let Some(text) = cache.get(document) {
-                return Some(Arc::clone(text));
-            }
-        }
+        // {
+        // let cache = self.inner.document_cache.read().await;
+        // if let Some(text) = cache.get(document) {
+        // return Some(Arc::clone(text));
+        // }
+        // }
 
         let mut request = request(&document);
 
@@ -253,6 +262,7 @@ impl SearchEngineHandle {
         .await;
 
         if !response.response.status().is_success() {
+            info!("Response from Kvarn isn't a 200. Page '{}'", document);
             return None;
         }
 
@@ -270,12 +280,11 @@ impl SearchEngineHandle {
     }
 
     /// Watch for changes and rebuild index/cache, only for the resources that changed.
-    pub async fn watch(&self, host: &Host) {
-        if host.options.disable_fs {
-            error!("Tried to watch a host for changes when the file system is disabled for it,");
-            return;
-        }
-
+    pub fn watch(
+        &self,
+        host_name: &'static str,
+        collection: Arc<HostCollection>,
+    ) -> Result<(), WatchError> {
         use notify::{event::EventKind::*, event::*, RecursiveMode, Watcher};
         use tokio::sync::mpsc::channel;
 
@@ -284,102 +293,165 @@ impl SearchEngineHandle {
             index: Option<PathBuf>,
         }
 
+        let host = collection
+            .get_host(host_name)
+            .ok_or(WatchError::HostNotFound)?;
+
+        if host.options.disable_fs {
+            return Err(WatchError::FsDisabled);
+        }
+
         let (tx, mut rx) = channel(1024);
 
-        let mut watcher = notify::RecommendedWatcher::new(move |res| {
-            futures::executor::block_on(async {
+        let mut watcher = notify::RecommendedWatcher::new(move |res| match res {
+            Err(err) => {
+                error!("Failed to watch directory, but continuing: {:?}", err);
+            }
+            Ok(res) => futures::executor::block_on(async {
                 tx.send(res).await.expect("failed to send notify message")
-            })
+            }),
         })
         .expect("failed to start watching directory for changes");
 
         let path = host.path.join(host.options.get_public_data_dir());
 
-        watcher.watch(&path, RecursiveMode::Recursive).unwrap();
+        info!("Watching {}", path.display());
 
         self.inner.watching.store(true, threading::Ordering::SeqCst);
-        loop {
-            let effects: EventEffects =
-                match rx.recv().await.expect("Failed to receive FS watch message") {
-                    Ok(mut event) => {
-                        let mut iter = std::mem::take(&mut event.paths).into_iter();
-                        let source = iter.next();
-                        let destination = iter.next();
-                        match event.kind {
-                            Create(CreateKind::File) => EventEffects {
-                                delete: None,
-                                index: source,
-                            },
-                            Remove(RemoveKind::File) => EventEffects {
-                                delete: source,
-                                index: None,
-                            },
-                            Modify(ModifyKind::Data(_)) => EventEffects {
-                                delete: None,
-                                index: source,
-                            },
-                            Modify(ModifyKind::Name(RenameMode::To)) => EventEffects {
-                                delete: None,
-                                index: source,
-                            },
-                            Modify(ModifyKind::Name(RenameMode::From)) => EventEffects {
-                                delete: source,
-                                index: None,
-                            },
-                            Modify(ModifyKind::Name(RenameMode::Both)) => EventEffects {
-                                delete: source,
-                                index: destination,
-                            },
-                            _ => EventEffects {
-                                delete: None,
-                                index: None,
-                            },
+
+        let host_name = host.name;
+        let handle = self.clone();
+
+        std::thread::spawn(move || {
+            watcher.watch(&path, RecursiveMode::Recursive).unwrap();
+            std::thread::park();
+        });
+
+        tokio::spawn(async move {
+            let host = collection
+                .get_host(host_name)
+                .expect("we just did this above");
+            loop {
+                let mut event = rx.recv().await.expect("Failed to receive FS watch message");
+                let mut iter = std::mem::take(&mut event.paths).into_iter();
+                let source = iter.next();
+                let destination = iter.next();
+                info!(
+                    "File {} changed on the FS. {}{}Event is of type {:?}.",
+                    source
+                        .as_deref()
+                        .unwrap_or_else(|| Path::new("<unknown>"))
+                        .display(),
+                    destination
+                        .as_deref()
+                        .unwrap_or_else(|| Path::new(""))
+                        .display(),
+                    if destination.is_some() {
+                        " is the destination. "
+                    } else {
+                        ""
+                    },
+                    event.kind,
+                );
+                let effects: EventEffects = match event.kind {
+                    Create(CreateKind::File) => EventEffects {
+                        delete: None,
+                        index: source,
+                    },
+                    Remove(RemoveKind::File) => EventEffects {
+                        delete: source,
+                        index: None,
+                    },
+                    Modify(ModifyKind::Data(_)) => EventEffects {
+                        delete: None,
+                        index: source,
+                    },
+                    Modify(ModifyKind::Name(RenameMode::To)) => EventEffects {
+                        delete: None,
+                        index: source,
+                    },
+                    Modify(ModifyKind::Name(RenameMode::From)) => EventEffects {
+                        delete: source,
+                        index: None,
+                    },
+                    Modify(ModifyKind::Name(RenameMode::Both)) => EventEffects {
+                        delete: source,
+                        index: destination,
+                    },
+                    _ => EventEffects {
+                        delete: None,
+                        index: None,
+                    },
+                };
+                if let Some(delete) = effects.delete.as_ref().and_then(|path| path.to_str()) {
+                    if handle.inner.options.force_remove {
+                        let mut doc_map = handle.inner.doc_map.write().await;
+                        let mut index = handle.inner.index.write().await;
+
+                        let mut path = PrefixPath::new(host).await;
+                        let document = if let Some(doc) = path
+                            .process(
+                                delete,
+                                host.path.is_absolute()
+                                    || host.options.get_public_data_dir().is_absolute(),
+                            )
+                            .await
+                        {
+                            doc
+                        } else {
+                            continue;
+                        };
+
+                        let id = doc_map.get_id(&document);
+                        if let Some(id) = id {
+                            doc_map.force_remove(id, &mut *index);
                         }
+                    } else {
+                        // On remove, rely on the missing feature of occurrences to clean it up.
                     }
-                    Err(err) => {
-                        warn!("Got error while watching directory for changes: {:?}", err);
+                }
+
+                if let Some(index) = effects.index.as_ref().and_then(|path| path.to_str()) {
+                    {
+                        let mut cache = handle.inner.document_cache.write().await;
+                        cache.remove(index);
+                    }
+
+                    let mut path = PrefixPath::new(host).await;
+                    let document = if let Some(doc) = path
+                        .process(
+                            index,
+                            host.path.is_absolute()
+                                || host.options.get_public_data_dir().is_absolute(),
+                        )
+                        .await
+                    {
+                        doc
+                    } else {
                         continue;
-                    }
-                };
-            if let Some(delete) = effects.delete.as_ref().and_then(|path| path.to_str()) {
-                if self.inner.options.force_remove {
-                    let mut doc_map = self.inner.doc_map.write().await;
-                    let mut index = self.inner.index.write().await;
+                    };
 
-                    let id = doc_map.get_id(delete);
-                    if let Some(id) = id {
-                        doc_map.force_remove(id, &mut *index);
+                    let text = if let Some(text) = handle.get_response(host, &document).await {
+                        text
+                    } else {
+                        continue;
+                    };
+
+                    let id = {
+                        let mut doc_map = handle.inner.doc_map.write().await;
+
+                        doc_map.reserve_id(&document)
+                    };
+
+                    {
+                        // `TODO`: Do this on a blocking thread. How to get lock?
+                        let mut index = handle.inner.index.write().await;
+                        index.digest_document(id, &text);
                     }
-                } else {
-                    // On remove, rely on the missing feature of occurrences to clean it up.
                 }
             }
-
-            if let Some(index) = effects.index.as_ref().and_then(|path| path.to_str()) {
-                {
-                    let mut cache = self.inner.document_cache.write().await;
-                    cache.remove(index);
-                }
-
-                let text = if let Some(text) = self.get_response(host, index).await {
-                    text
-                } else {
-                    return;
-                };
-
-                let id = {
-                    let mut doc_map = self.inner.doc_map.write().await;
-
-                    doc_map.reserve_id(index)
-                };
-
-                {
-                    // `TODO`: Do this on a blocking thread. How to get lock?
-                    let mut index = self.inner.index.write().await;
-                    index.digest_document(id, &text);
-                }
-            }
-        }
+        });
+        Ok(())
     }
 }
 
@@ -412,6 +484,8 @@ pub async fn mount_search(
         path,
         prepare!(req, host, _path, _addr, move |ext_handle| {
             struct UnsafeSendSync<T>(T);
+            // That's the whole point.
+            #[allow(clippy::non_send_fields_in_send_ty)]
             unsafe impl<T> Send for UnsafeSendSync<T> {}
             unsafe impl<T> Sync for UnsafeSendSync<T> {}
             impl<T, F: Future<Output = T> + Unpin> Future for UnsafeSendSync<F> {
@@ -677,9 +751,10 @@ struct PrefixPath {
     absolute: bool,
 }
 impl PrefixPath {
-    fn new(host: &Host) -> Self {
+    async fn new(host: &Host) -> Self {
+        let path = host.path.join(host.options.get_public_data_dir());
         Self {
-            path: host.path.join(host.options.get_public_data_dir()),
+            path: tokio::fs::canonicalize(&path).await.unwrap_or(path),
             absolute: false,
         }
     }
@@ -706,15 +781,32 @@ impl PrefixPath {
         self.absolute = true;
     }
 
-    fn process(&mut self, path: impl AsRef<Path>, host_absolute: bool) -> Option<String> {
+    async fn process(&mut self, path: impl AsRef<Path>, host_absolute: bool) -> Option<String> {
         let path = path.as_ref();
-        self.update(path, host_absolute);
 
-        let uri_path = if let Some(uri_path) = self.strip_prefix(path) {
+        let path = if path.is_dir() {
+            tokio::fs::canonicalize(path)
+                .await
+                .unwrap_or_else(|_| path.to_path_buf())
+        } else if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
+            let mut path = tokio::fs::canonicalize(parent)
+                .await
+                .unwrap_or_else(|_| path.to_path_buf());
+            path.push(file_name);
+            path
+        } else {
+            path.to_path_buf()
+        };
+        self.update(&path, host_absolute);
+
+        let uri_path = if let Some(uri_path) = self.strip_prefix(&path) {
             uri_path
         } else {
-            warn!("Host path isn't prefix of indexed resource.");
-            path
+            warn!(
+                "Host path ({}) isn't prefix of indexed resource.",
+                path.display()
+            );
+            &path
         };
         if let Some(uri_path) = uri_path.to_str() {
             Some(format!("/{}", uri_path))
@@ -724,7 +816,7 @@ impl PrefixPath {
         }
     }
 }
-fn find_documents(host: &Host, additional: &[Uri]) -> Vec<String> {
+async fn find_documents(host: &Host, additional: &[Uri]) -> Vec<String> {
     let mut list: Vec<_> = host
         .extensions
         .get_prepare_single()
@@ -735,7 +827,7 @@ fn find_documents(host: &Host, additional: &[Uri]) -> Vec<String> {
     list.extend(additional.iter().map(|uri| uri.path().to_owned()));
 
     let host_absolute = host.path.is_absolute() || host.options.get_public_data_dir().is_absolute();
-    let mut prefix_path = PrefixPath::new(host);
+    let mut prefix_path = PrefixPath::new(host).await;
 
     for entry in walkdir::WalkDir::new(prefix_path.prefix())
         .follow_links(true)
@@ -745,7 +837,7 @@ fn find_documents(host: &Host, additional: &[Uri]) -> Vec<String> {
     {
         let path = entry.path();
 
-        if let Some(uri_path) = prefix_path.process(path, host_absolute) {
+        if let Some(uri_path) = prefix_path.process(path, host_absolute).await {
             list.push(uri_path);
         }
     }
