@@ -245,12 +245,12 @@ impl SearchEngineHandle {
     }
 
     async fn get_response(&self, host: &Host, document: &str) -> Option<Arc<String>> {
-        // {
-        // let cache = self.inner.document_cache.read().await;
-        // if let Some(text) = cache.get(document) {
-        // return Some(Arc::clone(text));
-        // }
-        // }
+        {
+            let cache = self.inner.document_cache.read().await;
+            if let Some(text) = cache.get(document) {
+                return Some(Arc::clone(text));
+            }
+        }
 
         let mut request = request(&document);
 
