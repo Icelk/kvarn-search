@@ -193,13 +193,12 @@ pub struct SearchEngineHandle {
 impl SearchEngineHandle {
     /// This spawns a new [task](tokio::spawn) for every request it makes.
     /// The requests are processed in parallell - this should return within the longest response
-    /// duration-
-    pub async fn index(&self, host: &Host) {
+    /// duration.
+    pub async fn index(&self, host: &Host, documents: impl Iterator<Item = String>) {
         let start = time::Instant::now();
 
-        let documents = find_documents(host, &self.inner.options.additional_paths).await;
-
-        let mut handles = Vec::with_capacity(documents.len());
+        let size_hint = documents.size_hint();
+        let mut handles = Vec::with_capacity(size_hint.1.unwrap_or(size_hint.0));
 
         for document in documents {
             // SAFETY: We use the pointer inside the future.
@@ -224,9 +223,10 @@ impl SearchEngineHandle {
                 };
 
                 {
-                    // `TODO`: Do this on a blocking thread. How to get lock?
-                    let mut index = me.inner.index.write().await;
-                    index.digest_document(id, &text);
+                    tokio::task::spawn_blocking(move || {
+                        let mut index = futures::executor::block_on(me.inner.index.write());
+                        index.digest_document(id, &text);
+                    }).await.unwrap(); // `TODO`: Investigate if `.await` is a good idea here.
                 }
             });
             handles.push(handle);
@@ -242,6 +242,13 @@ impl SearchEngineHandle {
             start.elapsed().as_millis(),
         );
         debug!("Doc map: {:#?}", self.inner.doc_map.read().await);
+    }
+    /// Indexes all the pages in `host`.
+    ///
+    /// Read [this section of an article](https://icelk.dev/articles/search-engine.html#kvarn-integration) about how it fetches this.
+    pub async fn index_all(&self, host: &Host) {
+        let documents = find_documents(host, &self.inner.options.additional_paths).await;
+        self.index(host, documents.into_iter()).await;
     }
 
     async fn get_response(&self, host: &Host, document: &str) -> Option<Arc<String>> {
@@ -443,11 +450,11 @@ impl SearchEngineHandle {
                         doc_map.reserve_id(&document)
                     };
 
-                    {
-                        // `TODO`: Do this on a blocking thread. How to get lock?
-                        let mut index = handle.inner.index.write().await;
+                    let handle = handle.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let mut index = futures::executor::block_on(handle.inner.index.write());
                         index.digest_document(id, &text);
-                    }
+                    });
                 }
             }
         });
