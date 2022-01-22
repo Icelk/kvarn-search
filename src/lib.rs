@@ -63,6 +63,12 @@ pub struct Options {
     /// Only the [`Uri::path`] component will be used, so setting this to another domain won't work
     /// :)
     pub additional_paths: Vec<Uri>,
+
+    /// Index the WordPress-generated sitemap at `/sitemap.xml`?
+    ///
+    /// Default: `false`
+    /// Requires features: `wordpress-sitemap`
+    pub index_wordpress_sitemap: bool,
 }
 impl Options {
     pub fn new() -> Self {
@@ -77,6 +83,7 @@ impl Options {
             query_max_length: 100,
             query_max_terms: 10,
             additional_paths: Vec::new(),
+            index_wordpress_sitemap: false,
         }
     }
 }
@@ -98,11 +105,14 @@ struct HitResponse {
     associated_occurrences: Vec<usize>,
 }
 
-fn request(path: impl AsRef<str>) -> Request<application::Body> {
+/// `accept` MUST be a valid [`HeaderValue`].
+fn request(path: impl AsRef<str>, accept: impl AsRef<str>) -> Request<application::Body> {
     Request::builder()
         .uri(path.as_ref())
         .method("GET")
         .header("user-agent", "kvarn-search-engine-indexer")
+        .header("accept-encoding", "identity")
+        .header("accept", accept.as_ref())
         .body(kvarn::application::Body::Bytes(Bytes::new().into()))
         // We know this is OK.
         .unwrap()
@@ -195,10 +205,164 @@ impl SearchEngineHandle {
     /// The requests are processed in parallell - this should return within the longest response
     /// duration.
     pub async fn index(&self, host: &Host, documents: impl Iterator<Item = String>) {
+        #[derive(Debug)]
+        enum UriOrString {
+            String(String),
+            #[cfg(feature = "wordpress-sitemap")]
+            Uri(Uri),
+        }
+        impl UriOrString {
+            fn s(&self) -> &str {
+                match self {
+                    #[cfg(feature = "wordpress-sitemap")]
+                    Self::Uri(uri) => uri.path(),
+                    Self::String(s) => s,
+                }
+            }
+            fn into_string(self) -> String {
+                match self {
+                    #[cfg(feature = "wordpress-sitemap")]
+                    Self::Uri(uri) => uri.path().to_owned(),
+                    Self::String(s) => s,
+                }
+            }
+        }
+        #[cfg(feature = "wordpress-sitemap")]
+        #[derive(Debug)]
+        enum EitherIter<I1, I2> {
+            One(I1),
+            Two(I1, I2),
+        }
+        #[cfg(feature = "wordpress-sitemap")]
+        impl<T, I1: Iterator<Item = T>, I2: Iterator<Item = T>> Iterator for EitherIter<I1, I2> {
+            type Item = T;
+            fn next(&mut self) -> Option<Self::Item> {
+                match self {
+                    Self::One(i) => i.next(),
+                    Self::Two(i1, i2) => {
+                        if let Some(next) = i1.next() {
+                            Some(next)
+                        } else {
+                            i2.next()
+                        }
+                    }
+                }
+            }
+        }
+
         let start = time::Instant::now();
+
+        #[cfg(feature = "wordpress-sitemap")]
+        let bytes = if self.inner.options.index_wordpress_sitemap {
+            let mut request = request("/sitemap.xml", "text/xml");
+
+            let response = kvarn::handle_cache(
+                &mut request,
+                net::SocketAddrV4::new(net::Ipv4Addr::LOCALHOST, 0).into(),
+                host,
+            )
+            .await;
+
+            if !response.response.status().is_success() {
+                error!("Failed to get WordPress site map for a host where it was enabled");
+                return;
+            }
+
+            let bytes = response.identity_body;
+
+            Some(bytes)
+        } else {
+            None
+        };
+        #[cfg(feature = "wordpress-sitemap")]
+        let sitemap = if let Some(bytes) = &bytes {
+            let text = if let Ok(s) = str::from_utf8(bytes) {
+                s
+            } else {
+                error!("WordPress supplied a site map with invalid UTF-8");
+                return;
+            };
+
+            let sitemap = match roxmltree::Document::parse(text) {
+                Ok(doc) => doc,
+                Err(err) => {
+                    error!(
+                        "WordPress supplied an incorrectly formatted sitemap: {:?}",
+                        err
+                    );
+                    return;
+                }
+            };
+            Some(sitemap)
+        } else {
+            None
+        };
+        #[cfg(feature = "wordpress-sitemap")]
+        let urls = if let Some(sitemap) = &sitemap {
+            let urls = if let Some(c) = sitemap
+                .root()
+                .children()
+                .find(|c| c.is_element())
+                .and_then(|node| {
+                    if node.tag_name().name() == "urlset" {
+                        Some(node)
+                    } else {
+                        error!("WordPress site map: Expected <urlset> but got {:?}", node);
+                        None
+                    }
+                })
+                .map(|node| {
+                    node.children().filter_map(|c| {
+                        c.children().find(|c|c.is_element())
+                            .and_then(|loc| {
+                                if loc.tag_name().name() == "loc" {
+                                    Some(loc)
+                                } else {
+                                    error!(
+                                        "WordPress site map: Expected <loc> but got {:?}",
+                                        loc
+                                    );
+                                    None
+                                }
+                            })
+                            .and_then(|loc| {
+                                loc.text().or_else(|| {
+                                    error!("WordPress site map: <loc> is expected to be text.");
+                                    None
+                                })
+                            })
+                            .and_then(|loc| {
+                                loc.parse::<Uri>().ok().or_else(|| {
+                                    error!(
+                                        "WordPress site map: Failed to parse location as an URI"
+                                    );
+                                    None
+                                })
+                            })
+                    })
+                }) {
+                c
+            } else {
+                error!("WordPress returned invalid format for XML sitemap");
+                return;
+            };
+
+            Some(urls)
+        } else {
+            None
+        };
 
         let size_hint = documents.size_hint();
         let mut handles = Vec::with_capacity(size_hint.1.unwrap_or(size_hint.0));
+
+        let documents = documents.map(UriOrString::String);
+
+        #[cfg(feature = "wordpress-sitemap")]
+        let documents = if let Some(urls) = urls {
+            EitherIter::Two(documents, urls.map(UriOrString::Uri))
+        } else {
+            EitherIter::One(documents)
+        };
 
         for document in documents {
             // SAFETY: We use the pointer inside the future.
@@ -208,7 +372,10 @@ impl SearchEngineHandle {
             let me = self.clone();
             let handle = tokio::spawn(async move {
                 let host = unsafe { host_ptr.get() };
-                let response = me.get_response(host, &document).await;
+
+                info!("Indexing {:?}", document.s());
+
+                let response = me.get_response(host, document.s()).await;
 
                 let text = if let Some(text) = response {
                     text
@@ -219,14 +386,16 @@ impl SearchEngineHandle {
                 let id = {
                     let mut doc_map = me.inner.doc_map.write().await;
 
-                    doc_map.reserve_id(document)
+                    doc_map.reserve_id(document.into_string())
                 };
 
                 {
                     tokio::task::spawn_blocking(move || {
                         let mut index = futures::executor::block_on(me.inner.index.write());
                         index.digest_document(id, &text);
-                    }).await.unwrap(); // `TODO`: Investigate if `.await` is a good idea here.
+                    })
+                    .await
+                    .unwrap(); // `TODO`: Investigate if `.await` is a good idea here.
                 }
             });
             handles.push(handle);
@@ -259,7 +428,7 @@ impl SearchEngineHandle {
             }
         }
 
-        let mut request = request(&document);
+        let mut request = request(&document, "text/html");
 
         let response = kvarn::handle_cache(
             &mut request,

@@ -18,6 +18,11 @@ This extension provides an endpoint which returns the result in JSON format. The
 
 For an example of a frontend, check out [this portion of the overview at kvarn.org](https://kvarn.org/search.#frontend).
 
+# Cargo features
+
+Enable the `wordpress-sitemap` feature to automatically index a WordPress site.
+You also have to set the option `index_wordpress_sitemap` option in `Options` to enable it.
+
 # License
 
 `kvarn-search` is licensed under the [GNU LGPLv3](COPYING).
