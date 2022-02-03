@@ -22,7 +22,7 @@ serde = { version = "^1", features = ["derive"] }
 serde_json = "^1"
 tokio = { version = "^1", default-features = false, features = ["sync"] }
 walkdir = "^2"
-roxmltree = { version = "^0.14", optional = true }
+sitemap-iter = { version = "0.1.0", optional = true }
 
 [features]
-wordpress-sitemap = ["roxmltree"]
+wordpress-sitemap = ["sitemap-iter"]

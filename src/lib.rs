@@ -283,13 +283,10 @@ impl SearchEngineHandle {
                 return;
             };
 
-            let sitemap = match roxmltree::Document::parse(text) {
+            let sitemap = match sitemap_iter::Document::parse(text) {
                 Ok(doc) => doc,
                 Err(err) => {
-                    error!(
-                        "WordPress supplied an incorrectly formatted sitemap: {:?}",
-                        err
-                    );
+                    error!("WordPress supplied an incorrectly formatted sitemap: {err:?}");
                     return;
                 }
             };
@@ -299,55 +296,23 @@ impl SearchEngineHandle {
         };
         #[cfg(feature = "wordpress-sitemap")]
         let urls = if let Some(sitemap) = &sitemap {
-            let urls = if let Some(c) = sitemap
-                .root()
-                .children()
-                .find(|c| c.is_element())
-                .and_then(|node| {
-                    if node.tag_name().name() == "urlset" {
-                        Some(node)
+            match sitemap.iterate() {
+                Ok(iter) => Some(iter.filter_map(|entry| {
+                    if let Ok(uri) = entry.location.parse() {
+                        Some(uri)
                     } else {
-                        error!("WordPress site map: Expected <urlset> but got {:?}", node);
+                        error!(
+                            "WordPress sitemap contains invalid uri: {:?}",
+                            entry.location
+                        );
                         None
                     }
-                })
-                .map(|node| {
-                    node.children().filter_map(|c| {
-                        c.children().find(|c|c.is_element())
-                            .and_then(|loc| {
-                                if loc.tag_name().name() == "loc" {
-                                    Some(loc)
-                                } else {
-                                    error!(
-                                        "WordPress site map: Expected <loc> but got {:?}",
-                                        loc
-                                    );
-                                    None
-                                }
-                            })
-                            .and_then(|loc| {
-                                loc.text().or_else(|| {
-                                    error!("WordPress site map: <loc> is expected to be text.");
-                                    None
-                                })
-                            })
-                            .and_then(|loc| {
-                                loc.parse::<Uri>().ok().or_else(|| {
-                                    error!(
-                                        "WordPress site map: Failed to parse location as an URI"
-                                    );
-                                    None
-                                })
-                            })
-                    })
-                }) {
-                c
-            } else {
-                error!("WordPress returned invalid format for XML sitemap");
-                return;
-            };
-
-            Some(urls)
+                })),
+                Err(err) => {
+                    error!("WordPress supplied an incorrectly formatted sitemap: {err:?}");
+                    None
+                }
+            }
         } else {
             None
         };
