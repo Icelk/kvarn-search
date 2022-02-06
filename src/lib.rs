@@ -43,7 +43,7 @@ pub struct Options {
     /// This greatly improves performance, and stays out of your way, as it clears itself.
     ///
     /// Default: `10 minutes`
-    pub clear_interval: time::Duration,
+    pub clear_interval: Duration,
     /// The max length of the input query.
     ///
     /// If the length is too large, often many documents are searched, hurting performance.
@@ -79,7 +79,7 @@ impl Options {
             word_count_limit: 2_500,
             response_hits_limit: 50,
             distance_threshold: 100,
-            clear_interval: time::Duration::from_secs(10 * 60),
+            clear_interval: Duration::from_secs(10 * 60),
             query_max_length: 100,
             query_max_terms: 10,
             additional_paths: Vec::new(),
@@ -250,7 +250,7 @@ impl SearchEngineHandle {
             }
         }
 
-        let start = time::Instant::now();
+        let start = Instant::now();
 
         #[cfg(feature = "wordpress-sitemap")]
         let bytes = if self.inner.options.index_wordpress_sitemap {
@@ -641,7 +641,7 @@ pub async fn mount_search(
                 }
             }
 
-            let now = time::Instant::now();
+            let now = Instant::now();
 
             let handle = ext_handle;
 
