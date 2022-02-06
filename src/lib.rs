@@ -460,7 +460,7 @@ impl SearchEngineHandle {
 
         self.inner.watching.store(true, threading::Ordering::SeqCst);
 
-        let host_name = host.name;
+        let host_name = host.name.clone();
         let handle = self.clone();
 
         std::thread::spawn(move || {
@@ -470,7 +470,7 @@ impl SearchEngineHandle {
 
         tokio::spawn(async move {
             let host = collection
-                .get_host(host_name)
+                .get_host(&host_name)
                 .expect("we just did this above");
             loop {
                 let mut event = rx.recv().await.expect("Failed to receive FS watch message");
