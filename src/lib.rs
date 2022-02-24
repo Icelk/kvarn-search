@@ -21,7 +21,7 @@ pub struct Options {
     pub proximity_threshold: f32,
     /// Which proximity algorithm to use.
     ///
-    /// Default: [`search::proximity::Algorithm::Hamming`]
+    /// Default: [`elipdotter::proximity::Algorithm::Hamming`]
     pub proximity_algorithm: elipdotter::proximity::Algorithm,
     /// The limit of different words where it will only search for proximate words which start with
     /// the same [`char`].
