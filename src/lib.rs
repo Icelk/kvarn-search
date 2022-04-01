@@ -623,7 +623,7 @@ pub async fn mount_search(
 
     extensions.add_prepare_single(
         path,
-        prepare!(req, host, _path, _addr, move |ext_handle| {
+        prepare!(req, host, _path, _addr, move |ext_handle: SearchEngineHandle| {
             struct UnsafeSendSync<T>(T);
             // That's the whole point.
             #[allow(clippy::non_send_fields_in_send_ty)]
