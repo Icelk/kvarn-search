@@ -13,7 +13,6 @@ keywords = ["search", "search-engine", "fulltext"]
 categories = ["algorithms", "caching"]
 
 [dependencies]
-futures = "^0.3"
 kvarn = { path = "../kvarn", default-features = false }
 notify = "5.0.0-pre.13"
 scraper = "^0.12"

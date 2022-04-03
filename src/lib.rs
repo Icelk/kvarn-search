@@ -356,7 +356,7 @@ impl SearchEngineHandle {
 
                 {
                     tokio::task::spawn_blocking(move || {
-                        let mut index = futures::executor::block_on(me.inner.index.write());
+                        let mut index = tokio::runtime::Handle::current().block_on(me.inner.index.write());
                         index.digest_document(id, &text);
                     })
                     .await
@@ -448,7 +448,7 @@ impl SearchEngineHandle {
             Err(err) => {
                 error!("Failed to watch directory, but continuing: {:?}", err);
             }
-            Ok(res) => futures::executor::block_on(async {
+            Ok(res) => tokio::runtime::Handle::current().block_on(async {
                 tx.send(res).await.expect("failed to send notify message")
             }),
         })
@@ -586,7 +586,7 @@ impl SearchEngineHandle {
 
                     let handle = handle.clone();
                     tokio::task::spawn_blocking(move || {
-                        let mut index = futures::executor::block_on(handle.inner.index.write());
+                        let mut index = tokio::runtime::Handle::current().block_on(handle.inner.index.write());
                         index.digest_document(id, &text);
                     });
                 }
