@@ -340,7 +340,7 @@ impl SearchEngineHandle {
 
                 info!("Indexing {:?}", document.s());
 
-                let response = me.get_response(host, document.s()).await;
+                let response = me.get_response(host, document.s(), true).await;
 
                 let text = if let Some(text) = response {
                     text
@@ -386,8 +386,8 @@ impl SearchEngineHandle {
         self.index(host, documents.into_iter()).await;
     }
 
-    async fn get_response(&self, host: &Host, document: &str) -> Option<Arc<String>> {
-        {
+    async fn get_response(&self, host: &Host, document: &str, cache: bool) -> Option<Arc<String>> {
+        if cache {
             let cache = self.inner.document_cache.read().await;
             if let Some(text) = cache.get(document) {
                 return Some(Arc::clone(text));
@@ -582,7 +582,8 @@ impl SearchEngineHandle {
                         continue;
                     };
 
-                    let text = if let Some(text) = handle.get_response(host, &document).await {
+                    let text = if let Some(text) = handle.get_response(host, &document, false).await
+                    {
                         text
                     } else {
                         continue;
@@ -635,250 +636,262 @@ pub async fn mount_search(
 
     extensions.add_prepare_single(
         path,
-        prepare!(req, host, _path, _addr, move |ext_handle: SearchEngineHandle| {
-            struct UnsafeSendSync<T>(T);
-            // That's the whole point.
-            #[allow(clippy::non_send_fields_in_send_ty)]
-            unsafe impl<T> Send for UnsafeSendSync<T> {}
-            unsafe impl<T> Sync for UnsafeSendSync<T> {}
-            impl<T, F: Future<Output = T> + Unpin> Future for UnsafeSendSync<F> {
-                type Output = T;
-                fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-                    Pin::new(&mut self.0).poll(cx)
+        prepare!(
+            req,
+            host,
+            _path,
+            _addr,
+            move |ext_handle: SearchEngineHandle| {
+                struct UnsafeSendSync<T>(T);
+                // That's the whole point.
+                #[allow(clippy::non_send_fields_in_send_ty)]
+                unsafe impl<T> Send for UnsafeSendSync<T> {}
+                unsafe impl<T> Sync for UnsafeSendSync<T> {}
+                impl<T, F: Future<Output = T> + Unpin> Future for UnsafeSendSync<F> {
+                    type Output = T;
+                    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+                        Pin::new(&mut self.0).poll(cx)
+                    }
                 }
-            }
-            impl<T> UnsafeSendSync<T> {
-                fn inner(self) -> T {
-                    self.0
+                impl<T> UnsafeSendSync<T> {
+                    fn inner(self) -> T {
+                        self.0
+                    }
                 }
-            }
 
-            let now = Instant::now();
+                let now = Instant::now();
 
-            let handle = ext_handle;
+                let handle = ext_handle;
 
-            let query = utils::parse::query(req.uri().query().unwrap_or(""));
+                let query = utils::parse::query(req.uri().query().unwrap_or(""));
 
-            let query = if let Some(query) = query.get("q") {
-                query
-            } else {
-                return default_error_response(
-                    StatusCode::BAD_REQUEST,
-                    host,
-                    Some("specify the search query using URI query parameter `q`"),
-                )
-                .await;
-            };
-
-            if query.value().len() > handle.inner.options.query_max_length {
-                return default_error_response(
-                    StatusCode::BAD_REQUEST,
-                    host,
-                    Some("query is too long"),
-                )
-                .await;
-            }
-
-            let query: elipdotter::Query = match query.value().parse() {
-                Ok(q) => q,
-                Err(err) => {
-                    let message = format!("query malformed: {}", err);
-                    return default_error_response(StatusCode::BAD_REQUEST, host, Some(&message))
-                        .await;
-                }
-            };
-
-            {
-                let mut string_parts = 0;
-                query.root().for_each_string(&mut |_s| string_parts += 1);
-                if string_parts > handle.inner.options.query_max_terms {
+                let query = if let Some(query) = query.get("q") {
+                    query
+                } else {
                     return default_error_response(
                         StatusCode::BAD_REQUEST,
                         host,
-                        Some("too many parts in the query"),
+                        Some("specify the search query using URI query parameter `q`"),
+                    )
+                    .await;
+                };
+
+                if query.value().len() > handle.inner.options.query_max_length {
+                    return default_error_response(
+                        StatusCode::BAD_REQUEST,
+                        host,
+                        Some("query is too long"),
                     )
                     .await;
                 }
-            }
 
-            debug!("Starting getting docs: {:?}", now.elapsed().as_micros());
-
-            let (documents, proximate_map) = {
-                let lock = handle.inner.index.read().await;
-                let mut documents = query.documents(&*lock);
-                let docs = {
-                    let documents_iter = documents.iter().map(UnsafeSendSync);
-                    let documents_iter = match documents_iter {
-                        Ok(docs) => docs,
-                        Err(err) => match err {
-                            elipdotter::query::IterError::StrayNot => {
-                                return default_error_response(
-                                    StatusCode::BAD_REQUEST,
-                                    host,
-                                    Some("NOT without AND, this is an illegal operation"),
-                                )
-                                .await
-                            }
-                        },
-                    };
-
-                    documents_iter.inner().collect::<Vec<_>>()
+                let query: elipdotter::Query = match query.value().parse() {
+                    Ok(q) => q,
+                    Err(err) => {
+                        let message = format!("query malformed: {}", err);
+                        return default_error_response(
+                            StatusCode::BAD_REQUEST,
+                            host,
+                            Some(&message),
+                        )
+                        .await;
+                    }
                 };
-                let proximate_map = documents.take_proximate_map();
-                (docs, proximate_map)
-            };
 
-            debug!("Get docs with query: {:?}", now.elapsed().as_micros());
-
-            let documents = {
-                let lock = handle.inner.doc_map.read().await;
-                let mut docs = Vec::with_capacity(documents.len());
-                for id in documents {
-                    // ~~UNWRAP: We have just gotten this from the index, which is "associated" with
-                    // this doc map.~~
-                    // It could have been removed in the process.
-                    if let Some(name) = lock.get_name(id) {
-                        docs.push((id, name.to_owned()));
+                {
+                    let mut string_parts = 0;
+                    query.root().for_each_string(&mut |_s| string_parts += 1);
+                    if string_parts > handle.inner.options.query_max_terms {
+                        return default_error_response(
+                            StatusCode::BAD_REQUEST,
+                            host,
+                            Some("too many parts in the query"),
+                        )
+                        .await;
                     }
                 }
-                docs
-            };
 
-            debug!("Get docs names: {:?}", now.elapsed().as_micros());
+                debug!("Starting getting docs: {:?}", now.elapsed().as_micros());
 
-            let documents = {
-                let doc_len = documents.len();
+                let (documents, proximate_map) = {
+                    let lock = handle.inner.index.read().await;
+                    let mut documents = query.documents(&*lock);
+                    let docs = {
+                        let documents_iter = documents.iter().map(UnsafeSendSync);
+                        let documents_iter = match documents_iter {
+                            Ok(docs) => docs,
+                            Err(err) => match err {
+                                elipdotter::query::IterError::StrayNot => {
+                                    return default_error_response(
+                                        StatusCode::BAD_REQUEST,
+                                        host,
+                                        Some("NOT without AND, this is an illegal operation"),
+                                    )
+                                    .await
+                                }
+                            },
+                        };
 
-                let mut handles = Vec::with_capacity(doc_len);
+                        documents_iter.inner().collect::<Vec<_>>()
+                    };
+                    let proximate_map = documents.take_proximate_map();
+                    (docs, proximate_map)
+                };
 
-                for (id, doc) in documents {
-                    let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
-                    let se_handle = handle.clone();
-                    let handle = tokio::spawn(async move {
-                        let host = unsafe { host_ptr.get() };
-                        debug!("Requesting {}{}", host.name, doc);
+                debug!("Get docs with query: {:?}", now.elapsed().as_micros());
 
-                        let text = se_handle.get_response(host, &doc).await?;
+                let documents = {
+                    let lock = handle.inner.doc_map.read().await;
+                    let mut docs = Vec::with_capacity(documents.len());
+                    for id in documents {
+                        // ~~UNWRAP: We have just gotten this from the index, which is "associated" with
+                        // this doc map.~~
+                        // It could have been removed in the process.
+                        if let Some(name) = lock.get_name(id) {
+                            docs.push((id, name.to_owned()));
+                        }
+                    }
+                    docs
+                };
 
-                        Some((id, text))
+                debug!("Get docs names: {:?}", now.elapsed().as_micros());
+
+                let documents = {
+                    let doc_len = documents.len();
+
+                    let mut handles = Vec::with_capacity(doc_len);
+
+                    for (id, doc) in documents {
+                        let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
+                        let se_handle = handle.clone();
+                        let handle = tokio::spawn(async move {
+                            let host = unsafe { host_ptr.get() };
+                            debug!("Requesting {}{}", host.name, doc);
+
+                            let text = se_handle.get_response(host, &doc, true).await?;
+
+                            Some((id, text))
+                        });
+
+                        handles.push(handle);
+                    }
+
+                    let mut docs = HashMap::with_capacity(doc_len);
+
+                    for handle in handles {
+                        let value = handle.await.expect("Kvarn panicked");
+                        if let Some((id, text)) = value {
+                            docs.insert(id, text);
+                        }
+                    }
+
+                    docs
+                };
+
+                debug!("Get doc contents: {:?}", now.elapsed().as_micros());
+
+                let (mut hits, missing) = {
+                    let index = handle.inner.index.read().await;
+                    let doc_map = handle.inner.doc_map.read().await;
+                    let mut occurrences =
+                        elipdotter::SimpleIndexOccurenceProvider::new(&*index, &proximate_map);
+                    for (id, body) in &documents {
+                        occurrences.add_document(*id, Arc::clone(body));
+                    }
+
+                    // UNWRAP: We handled this above, and have asserted there are not stray NOTs in the
+                    // query.
+                    let occurrence_iter = query
+                        .occurrences(&occurrences, ext_handle.inner.options.distance_threshold)
+                        .unwrap();
+
+                    let occurrence_iter = occurrence_iter.map(|occurrence| {
+                        fn first_char_boundary(s: &str, start: usize, backwards: bool) -> usize {
+                            let mut start = start;
+                            loop {
+                                if s.is_char_boundary(start) {
+                                    break;
+                                }
+                                if backwards {
+                                    start -= 1;
+                                } else {
+                                    start += 1;
+                                }
+                            }
+                            start
+                        }
+                        let id = occurrence.id();
+                        let doc = &documents[&id];
+                        let start =
+                            first_char_boundary(doc, occurrence.start().saturating_sub(50), false);
+                        let end = first_char_boundary(
+                            doc,
+                            std::cmp::min(occurrence.start() + 50, doc.len()),
+                            true,
+                        );
+
+                        let context = doc[start..end].to_owned();
+
+                        let context_start_bytes = occurrence.start() - start;
+
+                        HitResponse {
+                            start: occurrence.start(),
+                            rating: occurrence.rating(),
+                            path: doc_map.get_name(id).unwrap_or("").to_owned(),
+                            context_start_chars: {
+                                context
+                                    .char_indices()
+                                    .position(|(pos, _char)| pos >= context_start_bytes)
+                                    .unwrap_or(context_start_bytes)
+                            },
+                            context,
+                            context_start_bytes,
+
+                            associated_occurrences: occurrence
+                                .associated_occurrences()
+                                .map(|occ| occ.start())
+                                .collect(),
+                        }
                     });
 
-                    handles.push(handle);
-                }
+                    let hits = occurrence_iter.collect::<Vec<_>>();
 
-                let mut docs = HashMap::with_capacity(doc_len);
+                    let missing = occurrences.missing();
 
-                for handle in handles {
-                    let value = handle.await.expect("Kvarn panicked");
-                    if let Some((id, text)) = value {
-                        docs.insert(id, text);
+                    (hits, missing)
+                };
+
+                {
+                    if !missing.list().is_empty() {
+                        info!("Removing {} elements from index.", missing.list().len());
                     }
+                    let mut index = handle.inner.index.write().await;
+                    missing.apply(&mut *index);
                 }
 
-                docs
-            };
+                debug!("Get hits / occurrences: {:?}", now.elapsed().as_micros());
 
-            debug!("Get doc contents: {:?}", now.elapsed().as_micros());
+                hits.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
 
-            let (mut hits, missing) = {
-                let index = handle.inner.index.read().await;
-                let doc_map = handle.inner.doc_map.read().await;
-                let mut occurrences =
-                    elipdotter::SimpleIndexOccurenceProvider::new(&*index, &proximate_map);
-                for (id, body) in &documents {
-                    occurrences.add_document(*id, Arc::clone(body));
-                }
+                hits.drain(
+                    std::cmp::min(hits.len(), ext_handle.inner.options.response_hits_limit)..,
+                );
 
-                // UNWRAP: We handled this above, and have asserted there are not stray NOTs in the
-                // query.
-                let occurrence_iter = query
-                    .occurrences(&occurrences, ext_handle.inner.options.distance_threshold)
+                let mut body = WriteableBytes::with_capacity(256);
+
+                // UNWRAP: The values should not panic when serializing.
+                serde_json::to_writer(&mut body, &hits).unwrap();
+
+                let response = Response::builder()
+                    .header("content-type", "application/json")
+                    .body(body.into_inner().freeze())
                     .unwrap();
 
-                let occurrence_iter = occurrence_iter.map(|occurrence| {
-                    fn first_char_boundary(s: &str, start: usize, backwards: bool) -> usize {
-                        let mut start = start;
-                        loop {
-                            if s.is_char_boundary(start) {
-                                break;
-                            }
-                            if backwards {
-                                start -= 1;
-                            } else {
-                                start += 1;
-                            }
-                        }
-                        start
-                    }
-                    let id = occurrence.id();
-                    let doc = &documents[&id];
-                    let start =
-                        first_char_boundary(doc, occurrence.start().saturating_sub(50), false);
-                    let end = first_char_boundary(
-                        doc,
-                        std::cmp::min(occurrence.start() + 50, doc.len()),
-                        true,
-                    );
+                debug!("Done: {:?}", now.elapsed().as_micros());
 
-                    let context = doc[start..end].to_owned();
-
-                    let context_start_bytes = occurrence.start() - start;
-
-                    HitResponse {
-                        start: occurrence.start(),
-                        rating: occurrence.rating(),
-                        path: doc_map.get_name(id).unwrap_or("").to_owned(),
-                        context_start_chars: {
-                            context
-                                .char_indices()
-                                .position(|(pos, _char)| pos >= context_start_bytes)
-                                .unwrap_or(context_start_bytes)
-                        },
-                        context,
-                        context_start_bytes,
-
-                        associated_occurrences: occurrence
-                            .associated_occurrences()
-                            .map(|occ| occ.start())
-                            .collect(),
-                    }
-                });
-
-                let hits = occurrence_iter.collect::<Vec<_>>();
-
-                let missing = occurrences.missing();
-
-                (hits, missing)
-            };
-
-            {
-                if !missing.list().is_empty() {
-                    info!("Removing {} elements from index.", missing.list().len());
-                }
-                let mut index = handle.inner.index.write().await;
-                missing.apply(&mut *index);
+                FatResponse::no_cache(response)
             }
-
-            debug!("Get hits / occurrences: {:?}", now.elapsed().as_micros());
-
-            hits.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
-
-            hits.drain(std::cmp::min(hits.len(), ext_handle.inner.options.response_hits_limit)..);
-
-            let mut body = WriteableBytes::with_capacity(256);
-
-            // UNWRAP: The values should not panic when serializing.
-            serde_json::to_writer(&mut body, &hits).unwrap();
-
-            let response = Response::builder()
-                .header("content-type", "application/json")
-                .body(body.into_inner().freeze())
-                .unwrap();
-
-            debug!("Done: {:?}", now.elapsed().as_micros());
-
-            FatResponse::no_cache(response)
-        }),
+        ),
     );
 
     let clear_handle = handle.clone();
