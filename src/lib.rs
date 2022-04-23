@@ -599,7 +599,6 @@ impl SearchEngineHandle {
                     tokio::task::spawn_blocking(move || {
                         let mut index =
                             tokio::runtime::Handle::current().block_on(handle.inner.index.write());
-                        println!("digesting doc {text}");
                         index.digest_document(id, &text);
                     });
                 }
