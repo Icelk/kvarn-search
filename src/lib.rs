@@ -356,7 +356,8 @@ impl SearchEngineHandle {
 
                 {
                     tokio::task::spawn_blocking(move || {
-                        let mut index = tokio::runtime::Handle::current().block_on(me.inner.index.write());
+                        let mut index =
+                            tokio::runtime::Handle::current().block_on(me.inner.index.write());
                         index.digest_document(id, &text);
                     })
                     .await
@@ -444,13 +445,14 @@ impl SearchEngineHandle {
 
         let (tx, mut rx) = channel(1024);
 
+        let rt = tokio::runtime::Handle::current();
         let mut watcher = notify::RecommendedWatcher::new(move |res| match res {
             Err(err) => {
                 error!("Failed to watch directory, but continuing: {:?}", err);
             }
-            Ok(res) => tokio::runtime::Handle::current().block_on(async {
-                tx.send(res).await.expect("failed to send notify message")
-            }),
+            Ok(res) => {
+                rt.block_on(async { tx.send(res).await.expect("failed to send notify message") })
+            }
         })
         .expect("failed to start watching directory for changes");
 
