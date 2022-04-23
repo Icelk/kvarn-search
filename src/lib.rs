@@ -477,7 +477,13 @@ impl SearchEngineHandle {
                 .get_host(&host_name)
                 .expect("we just did this above");
             loop {
-                let mut event = rx.recv().await.expect("Failed to receive FS watch message");
+                let _handle = tokio::runtime::Handle::current();
+                let mut event = if let Some(m) = rx.recv().await {
+                    m
+                } else {
+                    info!("Watcher dropped - stop watching for file changes.");
+                    break;
+                };
                 let mut iter = std::mem::take(&mut event.paths).into_iter();
                 let source = iter.next();
                 let destination = iter.next();
