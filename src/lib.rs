@@ -422,11 +422,16 @@ impl SearchEngineHandle {
     }
 
     /// Watch for changes and rebuild index/cache, only for the resources that changed.
-    pub fn watch(
+    ///
+    /// This must be called within a Tokio runtime.
+    ///
+    /// The returned [`notify::RecommendedWatcher`] should not be dropped.
+    /// When it is dropped, the functionality of this function stops.
+    pub async fn watch(
         &self,
         host_name: &'static str,
         collection: Arc<HostCollection>,
-    ) -> Result<(), WatchError> {
+    ) -> Result<notify::RecommendedWatcher, WatchError> {
         use notify::{event::EventKind::*, event::*, RecursiveMode, Watcher};
         use tokio::sync::mpsc::channel;
 
@@ -465,10 +470,7 @@ impl SearchEngineHandle {
         let host_name = host.name.clone();
         let handle = self.clone();
 
-        std::thread::spawn(move || {
-            watcher.watch(&path, RecursiveMode::Recursive).unwrap();
-            std::thread::park();
-        });
+        watcher.watch(&path, RecursiveMode::Recursive).unwrap();
 
         tokio::spawn(async move {
             let host = collection
@@ -588,13 +590,15 @@ impl SearchEngineHandle {
 
                     let handle = handle.clone();
                     tokio::task::spawn_blocking(move || {
-                        let mut index = tokio::runtime::Handle::current().block_on(handle.inner.index.write());
+                        let mut index =
+                            tokio::runtime::Handle::current().block_on(handle.inner.index.write());
+                        println!("digesting doc {text}");
                         index.digest_document(id, &text);
                     });
                 }
             }
         });
-        Ok(())
+        Ok(watcher)
     }
 }
 
