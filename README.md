@@ -23,6 +23,10 @@ For an example of a frontend, check out [this portion of the overview at kvarn.o
 Enable the `wordpress-sitemap` feature to automatically index a WordPress site.
 You also have to set the option `index_wordpress_sitemap` option in `Options` to enable it.
 
+# Versions
+
+- 0.1.x - `kvarn v0.4`
+
 # License
 
 `kvarn-search` is licensed under the [GNU LGPLv3](COPYING).
