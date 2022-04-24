@@ -27,6 +27,10 @@ You also have to set the option `index_wordpress_sitemap` option in `Options` to
 
 - 0.1.x - `kvarn v0.4`
 
+# Development
+
+Since this is used by some projects which require the git version of Kvarn, this requires [Kvarn](https://github.com/Icelk/kvarn) to be cloned at `../kvarn` during development.
+
 # License
 
 `kvarn-search` is licensed under the [GNU LGPLv3](COPYING).
