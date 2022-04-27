@@ -151,13 +151,70 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
                 if let Some(content) = selected_body {
                     // `TODO`: Convert to MD-like format to get better paragraphs,
                     // headings, and general formatting.
-                    let text = content.text();
+                    let nodes = content.descendants();
 
                     let mut document = String::with_capacity(body.len() / 2);
 
-                    for text_node in text {
-                        document.push_str(text_node.trim());
-                        document.push_str("\n\n");
+                    for node in nodes {
+                        if let scraper::Node::Text(e) = node.value() {
+                            let first = node.prev_sibling().is_none();
+                            let last = node.next_sibling().is_none();
+                            let trimmed = if e.chars().all(|c| c.is_whitespace()) {
+                                continue;
+                            } else if first && last {
+                                e.trim()
+                            } else if first {
+                                e.trim_start()
+                            } else if last {
+                                e.trim_end()
+                            } else {
+                                e
+                            };
+                            document.push_str(trimmed);
+                            // add newline?
+                            if last {
+                                let parent_tag = node
+                                    .parent()
+                                    .and_then(|p| p.value().as_element())
+                                    .map_or("", |parent| parent.name());
+                                let ignore = matches!(parent_tag, |"code"| "a"
+                                    | "span"
+                                    | "i"
+                                    | "b"
+                                    | "em"
+                                    | "strong"
+                                    | "u"
+                                    | "s"
+                                    | "q"
+                                    | "ul"
+                                    | "ol"
+                                    | "table"
+                                    | "center"
+                                    | "kbd"
+                                    | "cite"
+                                    | "abbr"
+                                    | "mark"
+                                    | "dfn"
+                                    | "small"
+                                    | "sup"
+                                    | "sub"
+                                    | "link"
+                                    | "script"
+                                    | "style"
+                                    | "img"
+                                    | "video");
+                                if ignore {
+                                    // do nothing
+                                } else if matches!(
+                                    parent_tag,
+                                    "hr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                                ) {
+                                    document.push_str("\n\n");
+                                } else {
+                                    document.push('\n');
+                                }
+                            }
+                        }
                     }
 
                     Cow::Owned(document)
