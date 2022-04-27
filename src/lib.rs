@@ -149,8 +149,36 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
                     });
 
                 if let Some(content) = selected_body {
-                    // `TODO`: Convert to MD-like format to get better paragraphs,
-                    // headings, and general formatting.
+                    let ignored = |s| {
+                        matches!(s, |"code"| "a"
+                            | "span"
+                            | "i"
+                            | "b"
+                            | "em"
+                            | "strong"
+                            | "u"
+                            | "s"
+                            | "q"
+                            | "ul"
+                            | "ol"
+                            | "table"
+                            | "center"
+                            | "kbd"
+                            | "cite"
+                            | "abbr"
+                            | "mark"
+                            | "dfn"
+                            | "small"
+                            | "sup"
+                            | "sub"
+                            | "link"
+                            | "script"
+                            | "style"
+                            | "img"
+                            | "video")
+                    };
+                    let doubled = |s| matches!(s, "hr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+
                     let nodes = content.descendants();
 
                     let mut document = String::with_capacity(body.len() / 2);
@@ -173,42 +201,36 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
                             document.push_str(trimmed);
                             // add newline?
                             if last {
-                                let parent_tag = node
-                                    .parent()
+                                let parent = node.parent();
+                                let parent_tag = parent
                                     .and_then(|p| p.value().as_element())
                                     .map_or("", |parent| parent.name());
-                                let ignore = matches!(parent_tag, |"code"| "a"
-                                    | "span"
-                                    | "i"
-                                    | "b"
-                                    | "em"
-                                    | "strong"
-                                    | "u"
-                                    | "s"
-                                    | "q"
-                                    | "ul"
-                                    | "ol"
-                                    | "table"
-                                    | "center"
-                                    | "kbd"
-                                    | "cite"
-                                    | "abbr"
-                                    | "mark"
-                                    | "dfn"
-                                    | "small"
-                                    | "sup"
-                                    | "sub"
-                                    | "link"
-                                    | "script"
-                                    | "style"
-                                    | "img"
-                                    | "video");
+                                let ignore = ignored(parent_tag);
                                 if ignore {
-                                    // do nothing
-                                } else if matches!(
-                                    parent_tag,
-                                    "hr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                                ) {
+                                    // if parent is last in grandparent, just use grandparent's
+                                    // newline capabilities.
+                                    if let Some(parent) = parent {
+                                        if parent.next_sibling().is_none() {
+                                            let grandparent = parent.parent();
+                                            if let Some(grandparent) = grandparent {
+                                                if let Some(tag) = grandparent
+                                                    .value()
+                                                    .as_element()
+                                                    .map(|p| p.name())
+                                                {
+                                                    if !ignored(tag) {
+                                                        if doubled(tag) {
+                                                            document.push_str("\n\n")
+                                                        } else {
+                                                            document.push('\n')
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // else (if ignored), do nothing
+                                } else if doubled(parent_tag) {
                                     document.push_str("\n\n");
                                 } else {
                                     document.push('\n');
