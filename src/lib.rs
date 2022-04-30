@@ -971,7 +971,7 @@ pub async fn mount_search(
 
                 debug!("Get hits / occurrences: {:?}", now.elapsed().as_micros());
 
-                hits.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
+                hits.sort_unstable_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
 
                 hits.drain(
                     std::cmp::min(hits.len(), ext_handle.inner.options.response_hits_limit)..,
