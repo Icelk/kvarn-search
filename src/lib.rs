@@ -948,7 +948,7 @@ pub async fn mount_search(
                             context_start_bytes,
 
                             associated_occurrences: occurrence
-                                .associated_occurrences()
+                                .occurrences()
                                 .map(|occ| occ.start())
                                 .collect(),
                         }

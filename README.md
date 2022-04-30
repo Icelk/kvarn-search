@@ -25,7 +25,17 @@ You also have to set the option `index_wordpress_sitemap` option in `Options` to
 
 # Versions
 
-- 0.1.x - `kvarn v0.4`
+-   0.1.x - `kvarn v0.4`
+-   0.2.x - `kvarn v0.4`
+
+# Changelog
+
+## v0.2.0
+
+-   Updated [elipdotter](https://crates.io/crates/elipdotter)
+    -   See [it's changelog](https://github.com/Icelk/elipdotter#v020) for the comprehensive improvements to search results and memory performance.
+-   Added option [`ignore_paths`](https://doc.icelk.dev/kvarn-search/kvarn_search/struct.Options.html#structfield.ignore_paths)
+    to filter out documents from being indexed.
 
 # Development
 
