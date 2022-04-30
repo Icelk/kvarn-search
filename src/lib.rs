@@ -58,11 +58,16 @@ pub struct Options {
     pub query_max_terms: usize,
 
     /// Additional documents to always index.
+    /// Only used if you call [`SearchEngineHandle::index_all`].
     /// Will only be once, at start-up, if they aren't on the FS.
     ///
     /// Only the [`Uri::path`] component will be used, so setting this to another domain won't work
     /// :)
     pub additional_paths: Vec<Uri>,
+    /// Always ignore queries which start with any of these [`Uri`]s.
+    ///
+    /// Only the [`Uri::path`] component will be used.
+    pub ignore_paths: Vec<Uri>,
 
     /// Index the WordPress-generated sitemap at `/sitemap.xml`?
     ///
@@ -83,6 +88,7 @@ impl Options {
             query_max_length: 100,
             query_max_terms: 10,
             additional_paths: Vec::new(),
+            ignore_paths: Vec::new(),
             index_wordpress_sitemap: false,
         }
     }
@@ -408,7 +414,15 @@ impl SearchEngineHandle {
             EitherIter::One(documents)
         };
 
-        for document in documents {
+        for document in documents.filter(|doc| {
+            !doc.s().starts_with("/./")
+                && !self
+                    .inner
+                    .options
+                    .ignore_paths
+                    .iter()
+                    .any(|ignored| doc.s().starts_with(ignored.path()))
+        }) {
             // SAFETY: We use the pointer inside the future.
             // When we await all handles at the end of this fn, the pointer is no longer used.
             // Therefore, it doesn't escape this fn. host isn't used after it's lifetime.
@@ -692,8 +706,16 @@ impl SearchEngineHandle {
 pub async fn mount_search(
     extensions: &mut Extensions,
     path: impl AsRef<str>,
-    options: Options,
+    mut options: Options,
 ) -> SearchEngineHandle {
+    let path = path.as_ref();
+    if let Ok(uri) = path.parse() {
+        options.ignore_paths.push(uri);
+    } else {
+        warn!(
+            "Mounting path supplied is not an URI: {path:?}. Should be something like '/search'."
+        );
+    }
     let index = elipdotter::SimpleIndex::new(
         options.proximity_threshold,
         options.proximity_algorithm,
