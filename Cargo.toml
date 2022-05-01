@@ -13,8 +13,8 @@ keywords = ["search", "search-engine", "fulltext"]
 categories = ["algorithms", "caching"]
 
 [dependencies]
-kvarn = { version = "0.4", default-features = false }
-# kvarn  = { path = "../kvarn", default-features = false }
+# kvarn = { version = "0.4", default-features = false }
+kvarn  = { path = "../kvarn", default-features = false }
 notify = "=5.0.0-pre.14"
 scraper = "0.13"
 elipdotter = "0.3"
