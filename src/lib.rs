@@ -1,11 +1,25 @@
-use elipdotter::index::Provider;
+use elipdotter::index::{OccurenceProvider, Provider};
 use kvarn::prelude::*;
 use tokio::sync::RwLock;
 
 pub use elipdotter;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexKind {
+    /// Stores only which documents words appear in.
+    /// Requires reading each of those documents when getting the occurrences.
+    Simple,
+    /// Stores all the occurrences of all the words.
+    /// Much faster than [`IndexType::Simple`] byt requires more memory.
+    /// This is basically like loading the entire website into memory.
+    Lossless,
+}
+
 #[derive(Debug)]
 pub struct Options {
+    /// The kind of index to use.
+    pub kind: IndexKind,
+
     /// Forces documents which have been deleted to be removed from the index immediately.
     ///
     /// This brings more consistent query times for a bit of performance if the FS is modified
@@ -78,6 +92,7 @@ pub struct Options {
 impl Options {
     pub fn new() -> Self {
         Self {
+            kind: IndexKind::Simple,
             force_remove: true,
             proximity_threshold: 0.85,
             proximity_algorithm: elipdotter::proximity::Algorithm::Hamming,
@@ -96,6 +111,26 @@ impl Options {
 impl Default for Options {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug)]
+enum Index {
+    Simple(elipdotter::SimpleIndex),
+    Lossless(elipdotter::LosslessIndex),
+}
+impl Index {
+    fn word_count(&self) -> usize {
+        match self {
+            Index::Simple(i) => i.words().count(),
+            Index::Lossless(i) => i.words().count(),
+        }
+    }
+    fn size(&self) -> usize {
+        match self {
+            Index::Simple(i) => i.size(),
+            Index::Lossless(i) => i.size(),
+        }
     }
 }
 
@@ -265,7 +300,7 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
 /// To not have to [`Arc`]s.
 #[derive(Debug)]
 struct SearchEngineHandleInner {
-    index: RwLock<elipdotter::SimpleIndex>,
+    index: RwLock<Index>,
     doc_map: RwLock<elipdotter::DocumentMap>,
     options: Options,
     watching: threading::atomic::AtomicBool,
@@ -451,7 +486,10 @@ impl SearchEngineHandle {
                     tokio::task::spawn_blocking(move || {
                         let mut index =
                             tokio::runtime::Handle::current().block_on(me.inner.index.write());
-                        index.digest_document(id, &text);
+                        match &mut *index {
+                            Index::Simple(i) => i.digest_document(id, &text),
+                            Index::Lossless(i) => i.digest_document(id, &text),
+                        }
                     })
                     .await
                     .unwrap(); // `TODO`: Investigate if `.await` is a good idea here.
@@ -465,11 +503,13 @@ impl SearchEngineHandle {
         }
 
         info!(
-            "Indexing done. {} words. Took {}ms.",
-            self.inner.index.read().await.words().count(),
+            "Indexing done. {} words. Took {}ms. Size in memory is {}KB",
+            self.inner.index.read().await.word_count(),
             start.elapsed().as_millis(),
+            self.inner.index.read().await.size() / 1024,
         );
         debug!("Doc map: {:#?}", self.inner.doc_map.read().await);
+        trace!("Index: {:#?}", self.inner.index.read().await);
     }
     /// Indexes all the pages in `host`.
     ///
@@ -648,7 +688,10 @@ impl SearchEngineHandle {
 
                         let id = doc_map.get_id(&document);
                         if let Some(id) = id {
-                            doc_map.force_remove(id, &mut *index);
+                            match &mut *index {
+                                Index::Simple(i) => doc_map.force_remove(id, i),
+                                Index::Lossless(i) => doc_map.force_remove(id, i),
+                            }
                         }
                     } else {
                         // On remove, rely on the missing feature of occurrences to clean it up.
@@ -692,7 +735,10 @@ impl SearchEngineHandle {
                     tokio::task::spawn_blocking(move || {
                         let mut index =
                             tokio::runtime::Handle::current().block_on(handle.inner.index.write());
-                        index.digest_document(id, &text);
+                        match &mut *index {
+                            Index::Simple(i) => i.digest_document(id, &text),
+                            Index::Lossless(i) => i.digest_document(id, &text),
+                        }
                     });
                 }
             }
@@ -716,11 +762,18 @@ pub async fn mount_search(
             "Mounting path supplied is not an URI: {path:?}. Should be something like '/search'."
         );
     }
-    let index = elipdotter::SimpleIndex::new(
-        options.proximity_threshold,
-        options.proximity_algorithm,
-        options.word_count_limit,
-    );
+    let index = match options.kind {
+        IndexKind::Simple => Index::Simple(elipdotter::SimpleIndex::new(
+            options.proximity_threshold,
+            options.proximity_algorithm,
+            options.word_count_limit,
+        )),
+        IndexKind::Lossless => Index::Lossless(elipdotter::LosslessIndex::new(
+            options.proximity_threshold,
+            options.proximity_algorithm,
+            options.word_count_limit,
+        )),
+    };
     let doc_map = elipdotter::DocumentMap::new();
 
     let handle = SearchEngineHandle {
