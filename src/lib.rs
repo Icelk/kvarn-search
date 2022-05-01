@@ -798,23 +798,6 @@ pub async fn mount_search(
             _path,
             _addr,
             move |ext_handle: SearchEngineHandle| {
-                struct UnsafeSendSync<T>(T);
-                // That's the whole point.
-                #[allow(clippy::non_send_fields_in_send_ty)]
-                unsafe impl<T> Send for UnsafeSendSync<T> {}
-                unsafe impl<T> Sync for UnsafeSendSync<T> {}
-                impl<T, F: Future<Output = T> + Unpin> Future for UnsafeSendSync<F> {
-                    type Output = T;
-                    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-                        Pin::new(&mut self.0).poll(cx)
-                    }
-                }
-                impl<T> UnsafeSendSync<T> {
-                    fn inner(self) -> T {
-                        self.0
-                    }
-                }
-
                 let now = Instant::now();
 
                 let handle = ext_handle;
@@ -871,26 +854,31 @@ pub async fn mount_search(
 
                 let (documents, proximate_map) = {
                     let lock = handle.inner.index.read().await;
-                    let mut documents = query.documents(&*lock);
-                    let docs = {
-                        let documents_iter = documents.iter().map(UnsafeSendSync);
-                        let documents_iter = match documents_iter {
-                            Ok(docs) => docs,
-                            Err(err) => match err {
-                                elipdotter::query::IterError::StrayNot => {
-                                    return default_error_response(
-                                        StatusCode::BAD_REQUEST,
-                                        host,
-                                        Some("NOT without AND, this is an illegal operation"),
-                                    )
-                                    .await
-                                }
-                            },
-                        };
-
-                        documents_iter.inner().collect::<Vec<_>>()
+                    let (documents, proximate_map) = match &*lock {
+                        Index::Simple(i) => {
+                            let mut d = query.documents(i);
+                            let i = d.iter().map(|i| i.collect::<Vec<_>>());
+                            (i, d.take_proximate_map())
+                        }
+                        Index::Lossless(i) => {
+                            let mut d = query.documents(i);
+                            let i = d.iter().map(|i| i.collect::<Vec<_>>());
+                            (i, d.take_proximate_map())
+                        }
                     };
-                    let proximate_map = documents.take_proximate_map();
+                    let docs = match documents {
+                        Ok(docs) => docs,
+                        Err(err) => match err {
+                            elipdotter::query::IterError::StrayNot => {
+                                return default_error_response(
+                                    StatusCode::BAD_REQUEST,
+                                    host,
+                                    Some("NOT without AND, this is an illegal operation"),
+                                )
+                                .await
+                            }
+                        },
+                    };
                     (docs, proximate_map)
                 };
 
