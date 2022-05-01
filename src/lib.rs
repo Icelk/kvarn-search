@@ -10,7 +10,7 @@ pub enum IndexKind {
     /// Requires reading each of those documents when getting the occurrences.
     Simple,
     /// Stores all the occurrences of all the words.
-    /// Much faster than [`IndexType::Simple`] byt requires more memory.
+    /// Much faster than [`IndexKind::Simple`] byt requires more memory.
     /// This is basically like loading the entire website into memory.
     Lossless,
 }
