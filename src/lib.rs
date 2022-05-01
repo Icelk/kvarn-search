@@ -135,15 +135,18 @@ impl Index {
 }
 
 #[derive(serde::Serialize)]
-struct HitResponse {
+struct ResponseOccurrence {
     start: usize,
-    rating: f32,
+    ctx_byte_idx: usize,
+    ctx_char_idx: usize,
+    ctx: String,
+}
+#[derive(serde::Serialize)]
+struct HitResponse {
     path: String,
-    context: String,
-    context_start_bytes: usize,
-    context_start_chars: usize,
+    rating: f32,
 
-    associated_occurrences: Vec<usize>,
+    occurrences: Vec<ResponseOccurrence>,
 }
 
 /// `accept` MUST be a valid [`HeaderValue`].
@@ -946,85 +949,138 @@ pub async fn mount_search(
                 let (mut hits, missing) = {
                     let index = handle.inner.index.read().await;
                     let doc_map = handle.inner.doc_map.read().await;
-                    let mut occurrences =
-                        elipdotter::SimpleIndexOccurenceProvider::new(&*index, &proximate_map);
-                    for (id, body) in &documents {
-                        occurrences.add_document(*id, Arc::clone(body));
+
+                    fn collect_hits<'a>(
+                        provider: &'a impl OccurenceProvider<'a>,
+                        query: &'a elipdotter::Query,
+                        distance_threshold: usize,
+                        documents: &HashMap<elipdotter::index::Id, Arc<String>>,
+                        doc_map: &elipdotter::DocumentMap,
+                    ) -> Vec<HitResponse> {
+                        // UNWRAP: We handled this above, and have asserted there are not stray NOTs in the
+                        // query.
+                        let occurrence_iter =
+                            query.occurrences(provider, distance_threshold).unwrap();
+                        occurrence_iter
+                            .map(|hit| {
+                                fn first_char_boundary(
+                                    s: &str,
+                                    start: usize,
+                                    backwards: bool,
+                                ) -> usize {
+                                    let mut start = start;
+                                    loop {
+                                        if s.is_char_boundary(start) {
+                                            break;
+                                        }
+                                        if backwards {
+                                            start -= 1;
+                                        } else {
+                                            start += 1;
+                                        }
+                                    }
+                                    start
+                                }
+
+                                let occurrences = hit.occurrences().map(|occ| {
+                                    let doc = &documents[&hit.id()];
+                                    let ctx_start = first_char_boundary(
+                                        doc,
+                                        occ.start().saturating_sub(50),
+                                        false,
+                                    );
+                                    let ctx_end = first_char_boundary(
+                                        doc,
+                                        std::cmp::min(occ.start() + 50, doc.len()),
+                                        true,
+                                    );
+
+                                    let ctx = doc[ctx_start..ctx_end].to_owned();
+
+                                    let ctx_byte_idx = occ.start() - ctx_start;
+
+                                    ResponseOccurrence {
+                                        start: occ.start(),
+                                        ctx_byte_idx,
+                                        ctx_char_idx: {
+                                            ctx.char_indices()
+                                                .position(|(pos, _char)| pos >= ctx_byte_idx)
+                                                .unwrap_or(ctx_byte_idx)
+                                        },
+                                        ctx,
+                                    }
+                                });
+
+                                HitResponse {
+                                    path: doc_map.get_name(hit.id()).unwrap_or("").to_owned(),
+                                    rating: hit.rating(),
+
+                                    occurrences: occurrences.collect(),
+                                }
+                            })
+                            .collect()
                     }
 
-                    // UNWRAP: We handled this above, and have asserted there are not stray NOTs in the
-                    // query.
-                    let occurrence_iter = query
-                        .occurrences(&occurrences, ext_handle.inner.options.distance_threshold)
-                        .unwrap();
-
-                    let occurrence_iter = occurrence_iter.map(|occurrence| {
-                        fn first_char_boundary(s: &str, start: usize, backwards: bool) -> usize {
-                            let mut start = start;
-                            loop {
-                                if s.is_char_boundary(start) {
-                                    break;
-                                }
-                                if backwards {
-                                    start -= 1;
-                                } else {
-                                    start += 1;
-                                }
+                    match &*index {
+                        Index::Simple(index) => {
+                            let mut occurrences =
+                                elipdotter::SimpleOccurrencesProvider::new(index, &proximate_map);
+                            for (id, body) in &documents {
+                                occurrences.add_document(*id, Arc::clone(body));
                             }
-                            start
+
+                            (
+                                collect_hits(
+                                    &occurrences,
+                                    &query,
+                                    ext_handle.inner.options.distance_threshold,
+                                    &documents,
+                                    &doc_map,
+                                ),
+                                Some(occurrences.missing()),
+                            )
                         }
-                        let id = occurrence.id();
-                        let doc = &documents[&id];
-                        let start =
-                            first_char_boundary(doc, occurrence.start().saturating_sub(50), false);
-                        let end = first_char_boundary(
-                            doc,
-                            std::cmp::min(occurrence.start() + 50, doc.len()),
-                            true,
-                        );
-
-                        let context = doc[start..end].to_owned();
-
-                        let context_start_bytes = occurrence.start() - start;
-
-                        HitResponse {
-                            start: occurrence.start(),
-                            rating: occurrence.rating(),
-                            path: doc_map.get_name(id).unwrap_or("").to_owned(),
-                            context_start_chars: {
-                                context
-                                    .char_indices()
-                                    .position(|(pos, _char)| pos >= context_start_bytes)
-                                    .unwrap_or(context_start_bytes)
-                            },
-                            context,
-                            context_start_bytes,
-
-                            associated_occurrences: occurrence
-                                .occurrences()
-                                .map(|occ| occ.start())
-                                .collect(),
+                        Index::Lossless(index) => {
+                            let provider =
+                                elipdotter::LosslessOccurrencesProvider::new(index, &proximate_map);
+                            (
+                                collect_hits(
+                                    &provider,
+                                    &query,
+                                    ext_handle.inner.options.distance_threshold,
+                                    &documents,
+                                    &doc_map,
+                                ),
+                                None,
+                            )
                         }
-                    });
-
-                    let hits = occurrence_iter.collect::<Vec<_>>();
-
-                    let missing = occurrences.missing();
-
-                    (hits, missing)
+                    }
                 };
 
-                {
+                if let Some(missing) = missing {
                     if !missing.list().is_empty() {
                         info!("Removing {} elements from index.", missing.list().len());
                     }
                     let mut index = handle.inner.index.write().await;
-                    missing.apply(&mut *index);
+                    if let Index::Simple(index) = &mut *index {
+                        missing.apply(index);
+                    }
                 }
 
                 debug!("Get hits / occurrences: {:?}", now.elapsed().as_micros());
 
-                hits.sort_unstable_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
+                hits.sort_unstable_by(|a, b| {
+                    let cmp = b
+                        .rating
+                        .partial_cmp(&a.rating)
+                        .unwrap_or(cmp::Ordering::Equal);
+                    // if rating is equal, prefer occurrences which start earlier in the document.
+                    if cmp.is_eq() {
+                        a.occurrences[0].start.cmp(&b.occurrences[0].start)
+                    } else {
+                        cmp
+                    }
+                });
 
                 hits.drain(
                     std::cmp::min(hits.len(), ext_handle.inner.options.response_hits_limit)..,
