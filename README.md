@@ -27,8 +27,16 @@ You also have to set the option `index_wordpress_sitemap` option in `Options` to
 
 -   0.1.x - `kvarn v0.4`
 -   0.2.x - `kvarn v0.4`
+-   0.3.x - `kvarn v0.4`
 
 # Changelog
+
+## v0.3.0
+
+-   Updated [elipdotter](https://crates.io/crates/elipdotter)
+    -   See [it's changelog](https://github.com/Icelk/elipdotter#v030) for the comprehensive improvements to search results and performance.
+-   Added option [`kind`](https://doc.icelk.dev/kvarn-search/kvarn_search/struct.Options.html#structfield.kind)
+    to choose the type of index. Using `Simple` takes less memory. Using `Lossless` is 10x faster but uses more memory (2-4x).
 
 ## v0.2.0
 
