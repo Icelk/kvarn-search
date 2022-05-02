@@ -151,8 +151,39 @@ struct HitResponse {
 
 /// `accept` MUST be a valid [`HeaderValue`].
 fn request(path: impl AsRef<str>, accept: impl AsRef<str>) -> Request<application::Body> {
+    // https://url.spec.whatwg.org/#c0-control-percent-encode-set
+    static CODE_SET: &percent_encoding::AsciiSet = &{
+        {
+            {
+                { percent_encoding::CONTROLS }
+                    .add(b' ')
+                    .add(b'"')
+                    .add(b'#')
+                    .add(b'<')
+                    .add(b'>')
+            }
+            .add(b'?')
+            .add(b'`')
+            .add(b'{')
+            .add(b'}')
+        }
+        .add(b':')
+        .add(b';')
+        .add(b'=')
+        .add(b'@')
+        .add(b'[')
+        .add(b'\\')
+        .add(b']')
+        .add(b'^')
+        .add(b'|')
+    }
+    .add(b'$')
+    .add(b'&');
+
+    let path = path.as_ref();
+
     Request::builder()
-        .uri(path.as_ref())
+        .uri(percent_encoding::utf8_percent_encode(path, CODE_SET).to_string())
         .method("GET")
         .header("user-agent", "kvarn-search-engine-indexer")
         .header("accept-encoding", "identity")

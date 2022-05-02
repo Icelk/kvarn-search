@@ -31,6 +31,14 @@ You also have to set the option `index_wordpress_sitemap` option in `Options` to
 
 # Changelog
 
+## v0.3.2
+
+-   Fixed issue when files has non-alphanumerical characters in them.
+
+## v0.3.1
+
+-   Removed unwanted debugging.
+
 ## v0.3.0
 
 -   Updated [elipdotter](https://crates.io/crates/elipdotter)
