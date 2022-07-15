@@ -252,13 +252,44 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
                             | "img"
                             | "video")
                     };
-                    let doubled = |s| matches!(s, "hr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+                    let doubled = |s: &str| {
+                        s.strip_prefix('h').and_then(|v| {
+                            if v.len() != 1 {
+                                return None;
+                            }
+                            let char = v.chars().next().unwrap();
+                            if char == 'r' || ('1'..='6').contains(&char) {
+                                Some(char)
+                            } else {
+                                None
+                            }
+                        })
+                    };
 
                     let nodes = content.descendants();
 
                     let mut document = String::with_capacity(body.len() / 2);
 
+                    let mut ignore = 0;
                     for node in nodes {
+                        if ignore > 0 {
+                            ignore -= 1;
+                            continue;
+                        }
+                        if let scraper::Node::Element(e) = node.value() {
+                            if let Some(char) = doubled(e.name()) {
+                                let hashes: Result<u32, _> = char.to_string().parse();
+                                if let Ok(hashes) = hashes {
+                                    for _ in 0..hashes {
+                                        document.push('#')
+                                    }
+                                    document.push(' ')
+                                }
+                            }
+                            if e.name() == "table" && e.attr("id") == Some("toc") {
+                                ignore = node.descendants().count();
+                            }
+                        }
                         if let scraper::Node::Text(e) = node.value() {
                             let first = node.prev_sibling().is_none();
                             let last = node.next_sibling().is_none();
@@ -294,7 +325,7 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
                                                     .map(|p| p.name())
                                                 {
                                                     if !ignored(tag) {
-                                                        if doubled(tag) {
+                                                        if doubled(tag).is_some() {
                                                             document.push_str("\n\n")
                                                         } else {
                                                             document.push('\n')
@@ -305,7 +336,7 @@ fn text_from_response(response: &kvarn::CacheReply) -> Result<Cow<'_, str>, ()> 
                                         }
                                     }
                                     // else (if ignored), do nothing
-                                } else if doubled(parent_tag) {
+                                } else if doubled(parent_tag).is_some() {
                                     document.push_str("\n\n");
                                 } else {
                                     document.push('\n');
