@@ -15,7 +15,7 @@ categories = ["algorithms", "caching"]
 [dependencies]
 # kvarn = { version = "0.4", default-features = false }
 kvarn  = { path = "../kvarn", default-features = false }
-notify = "=5.0.0-pre.14"
+notify = "=5.0.0-pre.16"
 scraper = "0.13"
 elipdotter = "=0.3.1"
 serde = { version = "1", features = ["derive"] }

@@ -649,14 +649,16 @@ impl SearchEngineHandle {
         let (tx, mut rx) = channel(1024);
 
         let rt = tokio::runtime::Handle::current();
-        let mut watcher = notify::RecommendedWatcher::new(move |res| match res {
-            Err(err) => {
-                error!("Failed to watch directory, but continuing: {:?}", err);
-            }
-            Ok(res) => {
-                rt.block_on(async { tx.send(res).await.expect("failed to send notify message") })
-            }
-        })
+        let mut watcher = notify::RecommendedWatcher::new(
+            move |res| match res {
+                Err(err) => {
+                    error!("Failed to watch directory, but continuing: {:?}", err);
+                }
+                Ok(res) => rt
+                    .block_on(async { tx.send(res).await.expect("failed to send notify message") }),
+            },
+            notify::Config::default(),
+        )
         .expect("failed to start watching directory for changes");
 
         let path = host.path.join(host.options.get_public_data_dir());
