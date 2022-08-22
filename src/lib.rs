@@ -1229,7 +1229,7 @@ impl PrefixPath {
         let uri_path = if let Some(uri_path) = self.strip_prefix(&path) {
             uri_path
         } else {
-            warn!(
+            info!(
                 "Host path ({}) isn't prefix of indexed resource.",
                 path.display()
             );
