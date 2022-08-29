@@ -1,6 +1,6 @@
 [package]
 name = "kvarn-search"
-version = "0.3.2"
+version = "0.4.0"
 authors = ["Icelk <main@icelk.dev>"]
 edition = "2021"
 rust-version = "1.56"
@@ -13,14 +13,13 @@ keywords = ["search", "search-engine", "fulltext"]
 categories = ["algorithms", "caching"]
 
 [dependencies]
-# kvarn = { version = "0.4", default-features = false }
-kvarn  = { path = "../kvarn", default-features = false }
+kvarn = { version = "0.5", path = "../kvarn", default-features = false }
 notify = "=5.0.0-pre.16"
 scraper = "0.13"
 elipdotter = "=0.3.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.17", default-features = false, features = ["sync"] }
+tokio = { version = "1.20", default-features = false, features = ["sync"] }
 walkdir = "2"
 sitemap-iter = { version = "0.1", optional = true }
 percent-encoding = "2"
