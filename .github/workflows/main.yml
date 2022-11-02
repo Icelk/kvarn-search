@@ -11,40 +11,22 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - name: Checking out sources
-              uses: actions/checkout@v1
-            - name: Installing Rust toolchain
-              uses: actions-rs/toolchain@v1
-              with:
-                  toolchain: stable
-                  override: true
-            - uses: Swatinem/rust-cache@v1
+              uses: actions/checkout@v3
+            - run: rustup toolchain install stable
+            - uses: Swatinem/rust-cache@v2
             - name: Clone Kvarn
               run: git clone https://github.com/Icelk/kvarn ../kvarn
             - name: Checking formatting
-              uses: actions-rs/cargo@v1
-              with:
-                  command: fmt
-                  args: -- --check
+              run: cargo fmt --check
             - name: Checking lints
-              uses: actions-rs/cargo@v1
-              with:
-                  command: clippy
-                  args: --all-targets -- -D warnings
+              run: cargo clippy --all-targets -- -D warnings
             - name: Checking lints with all features
-              uses: actions-rs/cargo@v1
-              with:
-                  command: clippy
-                  args: --all-targets --all-features -- -D warnings
+              run: cargo clippy --all-targets --all-features -- -D warnings
             - name: Checking lints with no features
-              uses: actions-rs/cargo@v1
-              with:
-                  command: clippy
-                  args: --no-default-features -- -D warnings
+              run: cargo clippy --no-default-features -- -D warnings
             - name: Checking doc references
               uses: Icelk/rustdoc-link-check@v1
               with:
                   private: true
             - name: Testing project
-              uses: actions-rs/cargo@v1
-              with:
-                  command: test
+              run: cargo test
