@@ -592,7 +592,7 @@ impl SearchEngineHandle {
             }
         }
 
-        let mut request = request(&document, "text/html");
+        let mut request = request(document, "text/html");
 
         let response = kvarn::handle_cache(
             &mut request,
