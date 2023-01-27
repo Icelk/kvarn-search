@@ -627,7 +627,7 @@ impl SearchEngineHandle {
     /// When it is dropped, the functionality of this function stops.
     pub async fn watch(
         &self,
-        host_name: &'static str,
+        host_name: impl Into<String>,
         collection: Arc<HostCollection>,
     ) -> Result<notify::RecommendedWatcher, WatchError> {
         use notify::{event::EventKind::*, event::*, RecursiveMode, Watcher};
@@ -638,8 +638,10 @@ impl SearchEngineHandle {
             index: Option<PathBuf>,
         }
 
+        let host_name = host_name.into();
+
         let host = collection
-            .get_host(host_name)
+            .get_host(&host_name)
             .ok_or(WatchError::HostNotFound)?;
 
         if host.options.disable_fs {
