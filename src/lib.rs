@@ -82,6 +82,13 @@ pub struct Options {
     ///
     /// Only the [`Uri::path`] component will be used.
     pub ignore_paths: Vec<Uri>,
+    /// Ignore these file extensions.
+    /// This is useful for not indexing images and other media.
+    ///
+    /// Defaults: `jpg avif ico png mkv mp4 mp3 m4a wav woff woff2 css js`
+    ///
+    /// The strings MUST NOT include `.`
+    pub ignore_extensions: Vec<String>,
 
     /// Index the WordPress-generated sitemap at `/sitemap.xml`?
     ///
@@ -104,6 +111,21 @@ impl Options {
             query_max_terms: 10,
             additional_paths: Vec::new(),
             ignore_paths: Vec::new(),
+            ignore_extensions: vec![
+                "jpg".into(),
+                "avif".into(),
+                "ico".into(),
+                "png".into(),
+                "mkv".into(),
+                "mp4".into(),
+                "mp3".into(),
+                "m4a".into(),
+                "wav".into(),
+                "woff".into(),
+                "woff2".into(),
+                "css".into(),
+                "js".into(),
+            ],
             index_wordpress_sitemap: false,
         }
     }
@@ -580,7 +602,12 @@ impl SearchEngineHandle {
     ///
     /// Read [this section of an article](https://icelk.dev/articles/search-engine.html#kvarn-integration) about how it fetches this.
     pub async fn index_all(&self, host: &Host) {
-        let documents = find_documents(host, &self.inner.options.additional_paths).await;
+        let documents = find_documents(
+            host,
+            &self.inner.options.additional_paths,
+            &self.inner.options.ignore_extensions,
+        )
+        .await;
         self.index(host, documents.into_iter()).await;
     }
 
@@ -603,6 +630,15 @@ impl SearchEngineHandle {
 
         if !response.response.status().is_success() {
             info!("Response from Kvarn isn't a 200. Page '{}'", document);
+            return None;
+        }
+        if !response
+            .response
+            .headers()
+            .get("content-type")
+            .and_then(|ct| ct.to_str().ok())
+            .map_or(false, |ct| ct.contains("text/html"))
+        {
             return None;
         }
 
@@ -1245,7 +1281,11 @@ impl PrefixPath {
         }
     }
 }
-async fn find_documents(host: &Host, additional: &[Uri]) -> Vec<String> {
+async fn find_documents(
+    host: &Host,
+    additional: &[Uri],
+    ignored_extensions: &[String],
+) -> Vec<String> {
     let mut list: Vec<_> = host
         .extensions
         .get_prepare_single()
@@ -1258,11 +1298,23 @@ async fn find_documents(host: &Host, additional: &[Uri]) -> Vec<String> {
     let host_absolute = host.path.is_absolute() || host.options.get_public_data_dir().is_absolute();
     let mut prefix_path = PrefixPath::new(host).await;
 
+    let file_filter = |path: &Path| {
+        for ignored in ignored_extensions {
+            if path
+                .extension()
+                .map_or(false, |ext| ext == ignored.as_str())
+            {
+                return false;
+            }
+        }
+        true
+    };
+
     for entry in walkdir::WalkDir::new(prefix_path.prefix())
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| !e.file_type().is_dir())
+        .filter(|e| !e.file_type().is_dir() && file_filter(e.path()))
     {
         let path = entry.path();
 
