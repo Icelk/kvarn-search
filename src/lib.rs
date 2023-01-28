@@ -553,7 +553,7 @@ impl SearchEngineHandle {
             let handle = tokio::spawn(async move {
                 let host = unsafe { host_ptr.get() };
 
-                info!("Indexing {:?}", document.s());
+                debug!("Indexing {:?}", document.s());
 
                 let response = me.get_response(host, document.s(), true).await;
 
@@ -590,7 +590,8 @@ impl SearchEngineHandle {
         }
 
         info!(
-            "Indexing done. {} words. Took {}ms. Size in memory is {}KB",
+            "Indexing done for {}. {} words. Took {}ms. Size in memory is {}KB",
+            host.name,
             self.inner.index.read().await.word_count(),
             start.elapsed().as_millis(),
             self.inner.index.read().await.size() / 1024,
@@ -629,7 +630,7 @@ impl SearchEngineHandle {
         .await;
 
         if !response.response.status().is_success() {
-            info!("Response from Kvarn isn't a 200. Page '{}'", document);
+            debug!("Response from Kvarn isn't a 200. Page '{}'", document);
             return None;
         }
         if !response
