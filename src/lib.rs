@@ -548,20 +548,33 @@ impl SearchEngineHandle {
             // SAFETY: We use the pointer inside the future.
             // When we await all handles at the end of this fn, the pointer is no longer used.
             // Therefore, it doesn't escape this fn. host isn't used after it's lifetime.
+            // could be negated with tokio scoped tasks, but that's not available: https://github.com/tokio-rs/tokio/issues/3162
             let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
             let me = self.clone();
             let handle = tokio::spawn(async move {
                 let host = unsafe { host_ptr.get() };
 
-                debug!("Indexing {:?}", document.s());
+                debug!("Getting response from {:?}", document.s());
 
                 let response = me.get_response(host, document.s(), true).await;
 
-                let text = if let Some(text) = response {
-                    text
-                } else {
-                    return;
-                };
+                response.map(|text| (document, text))
+            });
+            handles.push(handle);
+        }
+
+        let mut responses = Vec::new();
+        for handle in handles {
+            if let Some(response) = handle.await.expect("indexing task panicked") {
+                responses.push(response);
+            }
+        }
+        let me = self.clone();
+        let host_name = host.name.clone();
+        // move the processing to the background, so we return early!
+        tokio::spawn(async move {
+            for (document, text) in responses {
+                debug!("Indexing {:?}", document.s());
 
                 let id = {
                     let mut doc_map = me.inner.doc_map.write().await;
@@ -570,6 +583,7 @@ impl SearchEngineHandle {
                 };
 
                 {
+                    let me = me.clone();
                     tokio::task::spawn_blocking(move || {
                         let mut index =
                             tokio::runtime::Handle::current().block_on(me.inner.index.write());
@@ -581,23 +595,17 @@ impl SearchEngineHandle {
                     .await
                     .unwrap(); // `TODO`: Investigate if `.await` is a good idea here.
                 }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.await.expect("indexing task panicked");
-        }
-
-        info!(
-            "Indexing done for {}. {} words. Took {}ms. Size in memory is {}KB",
-            host.name,
-            self.inner.index.read().await.word_count(),
-            start.elapsed().as_millis(),
-            self.inner.index.read().await.size() / 1024,
-        );
-        debug!("Doc map: {:#?}", self.inner.doc_map.read().await);
-        trace!("Index: {:#?}", self.inner.index.read().await);
+            }
+            info!(
+                "Indexing done for {}. {} words. Took {}ms. Size in memory is {}KB",
+                host_name,
+                me.inner.index.read().await.word_count(),
+                start.elapsed().as_millis(),
+                me.inner.index.read().await.size() / 1024,
+            );
+            debug!("Doc map: {:#?}", me.inner.doc_map.read().await);
+            trace!("Index: {:#?}", me.inner.index.read().await);
+        });
     }
     /// Indexes all the pages in `host`.
     ///
