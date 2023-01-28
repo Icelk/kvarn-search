@@ -1081,8 +1081,22 @@ pub async fn mount_search(
                                     start
                                 }
 
-                                let occurrences = hit.occurrences().map(|occ| {
-                                    let doc = &documents[&hit.id()];
+                                let occurrences = hit.occurrences().filter_map(|occ| {
+                                    let Some(doc) = &documents.get(&hit.id()) else {
+                                        let loaded = documents.iter()
+                                                .map(|(k,v)| {
+                                                    let mut s = v.chars().take(50).collect();
+                                                    s+= "…";
+                                                    (*k, s)
+                                                })
+                                                .collect::<HashMap<_,String>>();
+                                        error!(
+                                            "Document {:?} wasn't loaded for the query. \
+                                            Documents loaded: {loaded:?}",
+                                            hit.id(),
+                                        );
+                                        return None;
+                                    };
                                     let ctx_start = first_char_boundary(
                                         doc,
                                         occ.start().saturating_sub(50),
@@ -1098,7 +1112,7 @@ pub async fn mount_search(
 
                                     let ctx_byte_idx = occ.start() - ctx_start;
 
-                                    ResponseOccurrence {
+                                    Some(ResponseOccurrence {
                                         start: occ.start(),
                                         ctx_byte_idx,
                                         ctx_char_idx: {
@@ -1107,7 +1121,7 @@ pub async fn mount_search(
                                                 .unwrap_or(ctx_byte_idx)
                                         },
                                         ctx,
-                                    }
+                                    })
                                 });
 
                                 HitResponse {
@@ -1117,6 +1131,7 @@ pub async fn mount_search(
                                     occurrences: occurrences.collect(),
                                 }
                             })
+                            .filter(|hit| !hit.occurrences.is_empty())
                             .collect()
                     }
 
