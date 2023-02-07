@@ -734,7 +734,7 @@ impl SearchEngineHandle {
                 let mut iter = std::mem::take(&mut event.paths).into_iter();
                 let source = iter.next();
                 let destination = iter.next();
-                info!(
+                debug!(
                     "File {} changed on the FS. {}{}Event is of type {:?}.",
                     source
                         .as_deref()
