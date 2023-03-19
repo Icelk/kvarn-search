@@ -708,7 +708,7 @@ impl SearchEngineHandle {
         )
         .expect("failed to start watching directory for changes");
 
-        let path = host.path.join(host.options.get_public_data_dir());
+        let path = Path::new(&host.path).join(host.options.get_public_data_dir());
 
         info!("Watching {}", path.display());
 
@@ -790,8 +790,8 @@ impl SearchEngineHandle {
                         let document = if let Some(doc) = path
                             .process(
                                 delete,
-                                host.path.is_absolute()
-                                    || host.options.get_public_data_dir().is_absolute(),
+                                Path::new(&host.path).is_absolute()
+                                    || Path::new(&host.options.get_public_data_dir()).is_absolute(),
                             )
                             .await
                         {
@@ -822,8 +822,8 @@ impl SearchEngineHandle {
                     let document = if let Some(doc) = path
                         .process(
                             index,
-                            host.path.is_absolute()
-                                || host.options.get_public_data_dir().is_absolute(),
+                            Path::new(&host.path).is_absolute()
+                                || Path::new(&host.options.get_public_data_dir()).is_absolute(),
                         )
                         .await
                     {
@@ -1241,7 +1241,7 @@ struct PrefixPath {
 }
 impl PrefixPath {
     async fn new(host: &Host) -> Self {
-        let path = host.path.join(host.options.get_public_data_dir());
+        let path = Path::new(&host.path).join(host.options.get_public_data_dir());
         Self {
             path: tokio::fs::canonicalize(&path).await.unwrap_or(path),
             absolute: false,
@@ -1314,12 +1314,13 @@ async fn find_documents(
         .extensions
         .get_prepare_single()
         .keys()
-        .cloned()
+        .map(|v| v.to_string())
         .collect();
 
     list.extend(additional.iter().map(|uri| uri.path().to_owned()));
 
-    let host_absolute = host.path.is_absolute() || host.options.get_public_data_dir().is_absolute();
+    let host_absolute = Path::new(&host.path).is_absolute()
+        || Path::new(&host.options.get_public_data_dir()).is_absolute();
     let mut prefix_path = PrefixPath::new(host).await;
 
     let file_filter = |path: &Path| {
