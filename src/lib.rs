@@ -551,7 +551,7 @@ impl SearchEngineHandle {
             // could be negated with tokio scoped tasks, but that's not available: https://github.com/tokio-rs/tokio/issues/3162
             let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
             let me = self.clone();
-            let handle = tokio::spawn(async move {
+            let handle = spawn(async move {
                 let host = unsafe { host_ptr.get() };
 
                 debug!("Getting response from {:?}", document.s());
@@ -559,20 +559,21 @@ impl SearchEngineHandle {
                 let response = me.get_response(host, document.s(), true).await;
 
                 response.map(|text| (document, text))
-            });
+            })
+            .await;
             handles.push(handle);
         }
 
         let mut responses = Vec::new();
         for handle in handles {
-            if let Some(response) = handle.await.expect("indexing task panicked") {
+            if let Some(response) = handle.await {
                 responses.push(response);
             }
         }
         let me = self.clone();
         let host_name = host.name.clone();
         // move the processing to the background, so we return early!
-        tokio::spawn(async move {
+        let _task = spawn(async move {
             for (document, text) in responses {
                 debug!("Indexing {:?}", document.s());
 
@@ -605,7 +606,8 @@ impl SearchEngineHandle {
             );
             debug!("Doc map: {:#?}", me.inner.doc_map.read().await);
             trace!("Index: {:#?}", me.inner.index.read().await);
-        });
+        })
+        .await;
     }
     /// Indexes all the pages in `host`.
     ///
@@ -719,7 +721,7 @@ impl SearchEngineHandle {
 
         watcher.watch(&path, RecursiveMode::Recursive).unwrap();
 
-        tokio::spawn(async move {
+        let _task = spawn(async move {
             let host = collection
                 .get_host(&host_name)
                 .expect("we just did this above");
@@ -856,7 +858,8 @@ impl SearchEngineHandle {
                     });
                 }
             }
-        });
+        })
+        .await;
         Ok(watcher)
     }
 }
@@ -1019,14 +1022,15 @@ pub async fn mount_search(
                     for (id, doc) in documents {
                         let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
                         let se_handle = handle.clone();
-                        let handle = tokio::spawn(async move {
+                        let handle = spawn(async move {
                             let host = unsafe { host_ptr.get() };
                             debug!("Requesting {}{}", host.name, doc);
 
                             let text = se_handle.get_response(host, &doc, true).await?;
 
                             Some((id, text))
-                        });
+                        })
+                        .await;
 
                         handles.push(handle);
                     }
@@ -1034,8 +1038,7 @@ pub async fn mount_search(
                     let mut docs = HashMap::with_capacity(doc_len);
 
                     for handle in handles {
-                        let value = handle.await.expect("Kvarn panicked");
-                        if let Some((id, text)) = value {
+                        if let Some((id, text)) = handle.await {
                             docs.insert(id, text);
                         }
                     }
