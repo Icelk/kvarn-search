@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use elipdotter::index::{OccurenceProvider, Provider};
 use kvarn::prelude::*;
 use tokio::sync::RwLock;
@@ -864,6 +866,164 @@ impl SearchEngineHandle {
     }
 }
 
+async fn get_documents_in_query<'a>(
+    host: &Host,
+    handle: &SearchEngineHandle,
+    query: &'a elipdotter::Query,
+) -> Result<
+    (
+        Vec<elipdotter::index::Id>,
+        elipdotter::proximity::ProximateMap<'a>,
+    ),
+    FatResponse,
+> {
+    let lock = handle.inner.index.read().await;
+    let (documents, proximate_map) = match &*lock {
+        Index::Simple(i) => {
+            let mut d = query.documents(i);
+            let i = d.iter().map(|i| i.collect::<Vec<_>>());
+            (i, d.take_proximate_map())
+        }
+        Index::Lossless(i) => {
+            let mut d = query.documents(i);
+            let i = d.iter().map(|i| i.collect::<Vec<_>>());
+            (i, d.take_proximate_map())
+        }
+    };
+    let docs = match documents {
+        Ok(docs) => docs,
+        Err(err) => match err {
+            elipdotter::query::IterError::StrayNot => {
+                return Err(default_error_response(
+                    StatusCode::BAD_REQUEST,
+                    host,
+                    Some("NOT without AND, this is an illegal operation"),
+                )
+                .await)
+            }
+        },
+    };
+    Ok((docs, proximate_map))
+}
+async fn get_documents<'a, I: IntoIterator<Item = &'a elipdotter::index::Id>>(
+    host: &Host,
+    handle: &SearchEngineHandle,
+    documents: I,
+) -> HashMap<elipdotter::index::Id, Arc<String>>
+where
+    I::IntoIter: ExactSizeIterator,
+{
+    let now = Instant::now();
+
+    let documents = documents.into_iter();
+    debug!("Get docs with query: {:?}", now.elapsed().as_micros());
+
+    let documents = {
+        let lock = handle.inner.doc_map.read().await;
+        let mut docs = Vec::with_capacity(documents.len());
+        for id in documents {
+            // ~~UNWRAP: We have just gotten this from the index, which is "associated" with
+            // this doc map.~~
+            // It could have been removed in the process.
+            if let Some(name) = lock.get_name(*id) {
+                docs.push((*id, name.to_owned()));
+            }
+        }
+        docs
+    };
+
+    debug!("Get docs names: {:?}", now.elapsed().as_micros());
+
+    let documents = {
+        let doc_len = documents.len();
+
+        let mut handles = Vec::with_capacity(doc_len);
+
+        for (id, doc) in documents {
+            let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
+            let se_handle = handle.clone();
+            let handle = spawn(async move {
+                let host = unsafe { host_ptr.get() };
+                debug!("Requesting {}{}", host.name, doc);
+
+                let text = se_handle.get_response(host, &doc, true).await?;
+
+                Some((id, text))
+            })
+            .await;
+
+            handles.push(handle);
+        }
+
+        let mut docs = HashMap::with_capacity(doc_len);
+
+        for handle in handles {
+            if let Some((id, text)) = handle.await {
+                docs.insert(id, text);
+            }
+        }
+
+        docs
+    };
+
+    debug!("Get doc contents: {:?}", now.elapsed().as_micros());
+
+    documents
+}
+
+fn first_char_boundary(s: &str, start: usize, backwards: bool) -> usize {
+    let mut start = start;
+    loop {
+        if s.is_char_boundary(start) {
+            break;
+        }
+        if backwards {
+            start -= 1;
+        } else {
+            start += 1;
+        }
+    }
+    start
+}
+fn resolve_context(
+    documents: &HashMap<elipdotter::index::Id, Arc<String>>,
+    id: elipdotter::index::Id,
+    occ_start: usize,
+) -> Option<ResponseOccurrence> {
+    let Some(doc) = &documents.get(&id) else {
+        let loaded = documents.iter()
+            .map(|(k,v)| {
+                let mut s = v.chars().take(50).collect();
+                s+= "…";
+                (*k, s)
+            })
+            .collect::<HashMap<_,String>>();
+        error!(
+            "Document {:?} wasn't loaded for the query. \
+            Documents loaded: {loaded:?}",
+            id,
+        );
+        return None;
+    };
+    let ctx_start = first_char_boundary(doc, occ_start.saturating_sub(50), false);
+    let ctx_end = first_char_boundary(doc, std::cmp::min(occ_start + 50, doc.len()), true);
+
+    let ctx = doc[ctx_start..ctx_end].to_owned();
+
+    let ctx_byte_idx = occ_start - ctx_start;
+
+    Some(ResponseOccurrence {
+        start: occ_start,
+        ctx_byte_idx,
+        ctx_char_idx: {
+            ctx.char_indices()
+                .position(|(pos, _char)| pos >= ctx_byte_idx)
+                .unwrap_or(ctx_byte_idx)
+        },
+        ctx,
+    })
+}
+
 /// `path`: the path to use for the search API.
 /// Use something which starts with `/./` if you don't want it to be public.
 pub async fn mount_search(
@@ -964,92 +1124,10 @@ pub async fn mount_search(
                     }
                 }
 
-                debug!("Starting getting docs: {:?}", now.elapsed().as_micros());
-
-                let (documents, proximate_map) = {
-                    let lock = handle.inner.index.read().await;
-                    let (documents, proximate_map) = match &*lock {
-                        Index::Simple(i) => {
-                            let mut d = query.documents(i);
-                            let i = d.iter().map(|i| i.collect::<Vec<_>>());
-                            (i, d.take_proximate_map())
-                        }
-                        Index::Lossless(i) => {
-                            let mut d = query.documents(i);
-                            let i = d.iter().map(|i| i.collect::<Vec<_>>());
-                            (i, d.take_proximate_map())
-                        }
-                    };
-                    let docs = match documents {
-                        Ok(docs) => docs,
-                        Err(err) => match err {
-                            elipdotter::query::IterError::StrayNot => {
-                                return default_error_response(
-                                    StatusCode::BAD_REQUEST,
-                                    host,
-                                    Some("NOT without AND, this is an illegal operation"),
-                                )
-                                .await
-                            }
-                        },
-                    };
-                    (docs, proximate_map)
-                };
-
-                debug!("Get docs with query: {:?}", now.elapsed().as_micros());
-
-                let documents = {
-                    let lock = handle.inner.doc_map.read().await;
-                    let mut docs = Vec::with_capacity(documents.len());
-                    for id in documents {
-                        // ~~UNWRAP: We have just gotten this from the index, which is "associated" with
-                        // this doc map.~~
-                        // It could have been removed in the process.
-                        if let Some(name) = lock.get_name(id) {
-                            docs.push((id, name.to_owned()));
-                        }
-                    }
-                    docs
-                };
-
-                debug!("Get docs names: {:?}", now.elapsed().as_micros());
-
-                let documents = {
-                    let doc_len = documents.len();
-
-                    let mut handles = Vec::with_capacity(doc_len);
-
-                    for (id, doc) in documents {
-                        let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
-                        let se_handle = handle.clone();
-                        let handle = spawn(async move {
-                            let host = unsafe { host_ptr.get() };
-                            debug!("Requesting {}{}", host.name, doc);
-
-                            let text = se_handle.get_response(host, &doc, true).await?;
-
-                            Some((id, text))
-                        })
-                        .await;
-
-                        handles.push(handle);
-                    }
-
-                    let mut docs = HashMap::with_capacity(doc_len);
-
-                    for handle in handles {
-                        if let Some((id, text)) = handle.await {
-                            docs.insert(id, text);
-                        }
-                    }
-
-                    docs
-                };
-
-                debug!("Get doc contents: {:?}", now.elapsed().as_micros());
-
+                let is_lossless;
                 let (mut hits, missing) = {
                     let index = handle.inner.index.read().await;
+                    is_lossless = matches!(&*index, Index::Lossless(_));
                     let doc_map = handle.inner.doc_map.read().await;
 
                     fn collect_hits<'a>(
@@ -1065,66 +1143,8 @@ pub async fn mount_search(
                             query.occurrences(provider, distance_threshold).unwrap();
                         occurrence_iter
                             .map(|hit| {
-                                fn first_char_boundary(
-                                    s: &str,
-                                    start: usize,
-                                    backwards: bool,
-                                ) -> usize {
-                                    let mut start = start;
-                                    loop {
-                                        if s.is_char_boundary(start) {
-                                            break;
-                                        }
-                                        if backwards {
-                                            start -= 1;
-                                        } else {
-                                            start += 1;
-                                        }
-                                    }
-                                    start
-                                }
-
                                 let occurrences = hit.occurrences().filter_map(|occ| {
-                                    let Some(doc) = &documents.get(&hit.id()) else {
-                                        let loaded = documents.iter()
-                                                .map(|(k,v)| {
-                                                    let mut s = v.chars().take(50).collect();
-                                                    s+= "…";
-                                                    (*k, s)
-                                                })
-                                                .collect::<HashMap<_,String>>();
-                                        error!(
-                                            "Document {:?} wasn't loaded for the query. \
-                                            Documents loaded: {loaded:?}",
-                                            hit.id(),
-                                        );
-                                        return None;
-                                    };
-                                    let ctx_start = first_char_boundary(
-                                        doc,
-                                        occ.start().saturating_sub(50),
-                                        false,
-                                    );
-                                    let ctx_end = first_char_boundary(
-                                        doc,
-                                        std::cmp::min(occ.start() + 50, doc.len()),
-                                        true,
-                                    );
-
-                                    let ctx = doc[ctx_start..ctx_end].to_owned();
-
-                                    let ctx_byte_idx = occ.start() - ctx_start;
-
-                                    Some(ResponseOccurrence {
-                                        start: occ.start(),
-                                        ctx_byte_idx,
-                                        ctx_char_idx: {
-                                            ctx.char_indices()
-                                                .position(|(pos, _char)| pos >= ctx_byte_idx)
-                                                .unwrap_or(ctx_byte_idx)
-                                        },
-                                        ctx,
-                                    })
+                                    resolve_context(documents, hit.id(), occ.start())
                                 });
 
                                 HitResponse {
@@ -1140,6 +1160,12 @@ pub async fn mount_search(
 
                     match &*index {
                         Index::Simple(index) => {
+                            let (docs, proximate_map) =
+                                match get_documents_in_query(host, handle, &query).await {
+                                    Ok(v) => v,
+                                    Err(v) => return v,
+                                };
+                            let documents = get_documents(host, handle, &docs).await;
                             let mut occurrences =
                                 elipdotter::SimpleOccurrencesProvider::new(index, &proximate_map);
                             for (id, body) in &documents {
@@ -1158,18 +1184,44 @@ pub async fn mount_search(
                             )
                         }
                         Index::Lossless(index) => {
+                            let docs =
+                            let proximate_map = query.documents(index).take_proximate_map();
+
                             let provider =
                                 elipdotter::LosslessOccurrencesProvider::new(index, &proximate_map);
-                            (
-                                collect_hits(
-                                    &provider,
-                                    &query,
-                                    ext_handle.inner.options.distance_threshold,
-                                    &documents,
-                                    &doc_map,
-                                ),
-                                None,
-                            )
+
+                            let hits = {
+                                let occurrence_iter = query
+                                    .occurrences(
+                                        &provider,
+                                        ext_handle.inner.options.distance_threshold,
+                                    )
+                                    .unwrap();
+                                occurrence_iter
+                                    .map(|hit| {
+                                        let occurrences =
+                                            hit.occurrences().map(|occ| ResponseOccurrence {
+                                                start: occ.start(),
+                                                ctx_byte_idx: 0,
+                                                ctx_char_idx: 0,
+                                                ctx: String::new(),
+                                            });
+
+                                        HitResponse {
+                                            path: doc_map
+                                                .get_name(hit.id())
+                                                .unwrap_or("")
+                                                .to_owned(),
+                                            rating: hit.rating(),
+
+                                            occurrences: occurrences.collect(),
+                                        }
+                                    })
+                                    .filter(|hit| !hit.occurrences.is_empty())
+                                    .collect()
+                            };
+
+                            (hits, None)
                         }
                     }
                 };
@@ -1202,6 +1254,32 @@ pub async fn mount_search(
                 hits.drain(
                     std::cmp::min(hits.len(), ext_handle.inner.options.response_hits_limit)..,
                 );
+
+                if is_lossless {
+                    let doc_map = handle.inner.doc_map.read().await;
+                    let docs: HashSet<elipdotter::index::Id> = hits
+                        .iter()
+                        .filter_map(|hit| {
+                            doc_map.get_id(&hit.path).or_else(|| {
+                                error!("Document {} disappeared when processing query", hit.path);
+                                None
+                            })
+                        })
+                        .collect();
+
+                    let documents = get_documents(host, handle, &docs).await;
+                    hits.iter_mut().for_each(|hit| {
+                        hit.occurrences.iter_mut().for_each(|occ| {
+                            if let Some(v) = resolve_context(
+                                &documents,
+                                doc_map.get_id(&hit.path).expect("we just got this"),
+                                occ.start,
+                            ) {
+                                *occ = v;
+                            }
+                        })
+                    });
+                }
 
                 let mut body = WriteableBytes::with_capacity(256);
 
