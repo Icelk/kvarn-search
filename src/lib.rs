@@ -1184,7 +1184,6 @@ pub async fn mount_search(
                             )
                         }
                         Index::Lossless(index) => {
-                            let docs =
                             let proximate_map = query.documents(index).take_proximate_map();
 
                             let provider =
