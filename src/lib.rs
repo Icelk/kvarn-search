@@ -551,10 +551,12 @@ impl SearchEngineHandle {
             // When we await all handles at the end of this fn, the pointer is no longer used.
             // Therefore, it doesn't escape this fn. host isn't used after it's lifetime.
             // could be negated with tokio scoped tasks, but that's not available: https://github.com/tokio-rs/tokio/issues/3162
-            let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
+            let host_ptr = UnsafePointer(host as *const Host);
             let me = self.clone();
             let handle = spawn(async move {
-                let host = unsafe { host_ptr.get() };
+                #[allow(clippy::redundant_locals)] // to satisfy borrow checker
+                let host_ptr = host_ptr;
+                let host = unsafe { &*host_ptr.0 };
 
                 debug!("Getting response from {:?}", document.s());
 
@@ -940,10 +942,12 @@ where
         let mut handles = Vec::with_capacity(doc_len);
 
         for (id, doc) in documents {
-            let host_ptr = unsafe { utils::SuperUnsafePointer::new(host) };
+            let host_ptr = UnsafePointer(host as *const Host);
             let se_handle = handle.clone();
             let handle = spawn(async move {
-                let host = unsafe { host_ptr.get() };
+                #[allow(clippy::redundant_locals)] // to satisfy borrow checker
+                let host_ptr = host_ptr;
+                let host = unsafe { &*host_ptr.0 };
                 debug!("Requesting {}{}", host.name, doc);
 
                 let text = se_handle.get_response(host, &doc, true).await?;
@@ -991,13 +995,14 @@ fn resolve_context(
     occ_start: usize,
 ) -> Option<ResponseOccurrence> {
     let Some(doc) = &documents.get(&id) else {
-        let loaded = documents.iter()
-            .map(|(k,v)| {
+        let loaded = documents
+            .iter()
+            .map(|(k, v)| {
                 let mut s = v.chars().take(50).collect();
-                s+= "…";
+                s += "…";
                 (*k, s)
             })
-            .collect::<HashMap<_,String>>();
+            .collect::<HashMap<_, String>>();
         error!(
             "Document {:?} wasn't loaded for the query. \
             Documents loaded: {loaded:?}",
@@ -1430,3 +1435,7 @@ async fn find_documents(
 
     list
 }
+
+struct UnsafePointer<T>(*const T);
+unsafe impl<T: Send + Sync> Send for UnsafePointer<T> {}
+unsafe impl<T: Sync> Sync for UnsafePointer<T> {}
