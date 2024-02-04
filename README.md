@@ -29,8 +29,14 @@ You also have to set the option `index_wordpress_sitemap` option in `Options` to
 -   0.2.x - `kvarn v0.4`
 -   0.3.x - `kvarn v0.4`
 -   0.4.x - `kvarn v0.5.x`
+-   0.5.x - `kvarn v0.6.x`
 
 # Changelog
+
+## v0.5.0
+
+-   Support Kvarn v0.6.0
+-   Update elipdotter & scraper.
 
 ## v0.4.0
 
