@@ -1,5 +1,5 @@
 [![crates.io version](https://img.shields.io/crates/v/kvarn-search)](https://crates.io/crates/kvarn-search)
-![lines of code](https://img.shields.io/tokei/lines/github/Icelk/kvarn-search)
+![lines of code](https://tokei.rs/b1/github/Icelk/kvarn-search?style=flat)
 ![license](https://img.shields.io/github/license/Icelk/kvarn-search)
 
 # [Kvarn search](https://kvarn.org/search.)
